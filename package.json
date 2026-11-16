@@ -1,0 +1,20 @@
+{
+  "name": "fish-os",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fish OS — 跨平台数字生命核心：人格引擎 + 长期记忆 + 事件存储 + 审批策略 + 主动行为调度 + Character OS Bridge（零外部依赖）",
+  "license": "MIT",
+  "bin": {
+    "fish": "./bin/fish.mjs"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "fish": "node ./bin/fish.mjs",
+    "daemon": "node ./bin/fish-daemon.mjs"
+  },
+  "engines": {
+    "node": ">=20.3.0"
+  },
+  "dependencies": {}
+}

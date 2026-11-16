@@ -1,0 +1,12 @@
+services:
+  fish:
+    build: .
+    environment:
+      FISH_HOME: /data
+      FISH_TICK_MS: "60000"
+    volumes:
+      - fish-data:/data
+    restart: unless-stopped
+
+volumes:
+  fish-data:
