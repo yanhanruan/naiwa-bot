@@ -157,19 +157,22 @@ test('@ 段保留显示名；模型信封用会话内代号区分发言者和被
   assert.throws(() => messageForModel(message), TypeError);
 });
 
-function setup(t) {
+// 多数入口测试关注身份与记录，不关心群聊闸门，因此默认沿用“群里每条都回复”的兼容模式；闸门有单独测试。
+function setup(t, { replyToAllGroupMessages = true } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'fish-module1-'));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const fish = new Fish({ home });
   const requests = [], sent = [], errors = [];
   const brain = { chat: async (messages) => { requests.push(messages); return '收到'; } };
+  // 模拟 OneBot 的发送结果：返回新消息的 message_id。
   const client = {
-    sendGroupMsg: async (id, message) => sent.push({ kind: 'group', id, message }),
-    sendPrivateMsg: async (id, message) => sent.push({ kind: 'private', id, message }),
+    sendGroupMsg: async (id, message) => ({ message_id: 9000 + sent.push({ kind: 'group', id, message }) }),
+    sendPrivateMsg: async (id, message) => ({ message_id: 9000 + sent.push({ kind: 'private', id, message }) }),
   };
   const handle = createQQHandler({
     fish, brain, getClient: () => client, persona: '测试角色',
     now: () => new Date('2026-11-12T00:00:00Z'), onError: (stage, error) => errors.push({ stage, error }),
+    replyToAllGroupMessages,
   });
   return { fish, handle, requests, sent, errors, brain };
 }
@@ -367,7 +370,7 @@ test('发送失败不记录：历史、记忆和关系都不把未送达的回�
   const client = { sendGroupMsg: async () => { throw new Error('未连接'); } };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色',
-    onError: (stage, error) => h.errors.push({ stage, error }),
+    onError: (stage, error) => h.errors.push({ stage, error }), replyToAllGroupMessages: true,
   });
   await handle(event({ message: '第一句' }));
   assert.deepEqual(h.errors.map((e) => e.error.message), ['未连接']);
@@ -378,4 +381,29 @@ test('发送失败不记录：历史、记忆和关系都不把未送达的回�
   const history = h.requests[1].filter((m) => m.role !== 'system');
   assert.equal(history.length, 1);
   assert.ok(!JSON.stringify(history).includes('第一句'));
+});
+
+test('群聊闸门：没叫到奶蛙的群消息不调模型、不回复、不记录；私聊照常回复', async (t) => {
+  const h = setup(t, { replyToAllGroupMessages: false });
+  await h.handle(event({ message: '大家晚上好' }));
+  await h.handle(event({ message_id: 2, message: '[CQ:at,qq=all]开会了' }));
+  await h.handle(event({ message_id: 3, message: '[CQ:at,qq=102]你看这个' }));
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.fish.memory.count(), 0);
+  await h.handle(event({ message_type: 'private', sub_type: 'friend', message_id: 4, message: '在吗' }));
+  assert.deepEqual(h.sent.map((s) => s.kind), ['private']);
+});
+
+test('群聊闸门：被 @ 时回复；引用奶蛙自己发出的消息时回复，引用别人的消息不回复', async (t) => {
+  const h = setup(t, { replyToAllGroupMessages: false });
+  await h.handle(event({ message: '[CQ:at,qq=900]奶蛙你好' }));
+  assert.equal(h.sent.length, 1); // 奶蛙这条回复的 message_id 是 9001
+  await h.handle(event({ message_id: 2, message: '[CQ:reply,id=9001]哈哈真的吗' }));
+  assert.equal(h.sent.length, 2);
+  await h.handle(event({ message_id: 3, message: '[CQ:reply,id=1]我也觉得' }));
+  assert.equal(h.sent.length, 2);
+  // 另一个群里同样编号的消息不是奶蛙在这个群发的，不算引用奶蛙。
+  await h.handle(event({ group_id: 201, message_id: 4, message: '[CQ:reply,id=9001]嗯' }));
+  assert.equal(h.sent.length, 2);
 });

@@ -1,4 +1,5 @@
 import { scope } from './schema.js';
+import { normalizeId, messageKey } from './identity.js';
 import { normalizeOneBotMessage } from './adapters/onebot-message.js';
 import { seg } from './adapters/onebot.js';
 import { messageForModel, createAliasBook } from './message.js';
@@ -23,14 +24,37 @@ function nowText(date) {
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')} ${weekday}`;
 }
 
+const SENT_MESSAGE_LIMIT = 2000;
+
 // 从 bin 提取现有聊天逻辑，便于用模拟模型/传输测试实际入口。
 // 本模块尚无队列、去重或参与决策；这些由后续 module 5 / 7 实现。
+// 群聊临时闸门：私聊总是回复；群聊只在被 @ 或有人引用奶蛙自己发出的消息时回复。
+// replyToAllGroupMessages 为 true 时恢复旧行为（群里每条含文本的消息都回复），仅供兼容；module 7 会替换这套规则。
 export function createQQHandler({ fish, brain, getClient, persona, socialRules = '', now = () => new Date(),
   onError = (stage, error) => console.error(`[fish-bot] ${stage}：`, error?.message ?? error),
+  replyToAllGroupMessages = false,
 }) {
   const histories = new Map(); // conversation.key -> 模型消息；用户关系使用 sender.key。
   const aliasBooks = new Map(); // conversation.key -> 会话内代号簿；与历史一样只在进程内有效。
+  const sentMessages = new Set(); // 奶蛙发出的消息 key，用于判断“引用了奶蛙”；只在进程内，按插入顺序淘汰。
   const historyTurns = 6;
+
+  function rememberSent(message, result) {
+    let id;
+    try {
+      id = normalizeId(result?.message_id, 'message_id');
+    } catch {
+      return; // 有的实现不返回消息 ID；那样只是无法识别对它的引用。
+    }
+    sentMessages.add(messageKey(message.conversation.key, id));
+    if (sentMessages.size > SENT_MESSAGE_LIMIT) sentMessages.delete(sentMessages.values().next().value);
+  }
+
+  function isAddressed(message) {
+    if (message.conversation.kind === 'private' || replyToAllGroupMessages) return true;
+    return message.mentionsSelf ||
+      message.segments.some((s) => s.type === 'reply' && sentMessages.has(s.messageKey));
+  }
 
   function aliasesFor(conversationKey) {
     if (!aliasBooks.has(conversationKey)) aliasBooks.set(conversationKey, createAliasBook());
@@ -73,11 +97,10 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
 
   async function send(message, reply) {
     const client = getClient();
-    if (message.conversation.kind === 'group') {
-      await client.sendGroupMsg(message.source.targetId, [seg.text(reply)]);
-    } else {
-      await client.sendPrivateMsg(message.source.targetId, [seg.text(reply)]);
-    }
+    const result = message.conversation.kind === 'group'
+      ? await client.sendGroupMsg(message.source.targetId, [seg.text(reply)])
+      : await client.sendPrivateMsg(message.source.targetId, [seg.text(reply)]);
+    rememberSent(message, result);
   }
 
   // 只在回复确实发出后调用：历史、情节记忆、关系都只记录已经发生的事。
@@ -108,6 +131,8 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     }
     // 本轮保持原有“只对含文本的消息回复”的行为；纯图片/@ 的参与规则留待 module 7。
     if (!message || !message.text.trim()) return;
+    // 没叫到奶蛙的群消息直接忽略：不调模型、不回复、不记录。
+    if (!isAddressed(message)) return;
 
     let turn = null;
     try {

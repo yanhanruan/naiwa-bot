@@ -4,10 +4,9 @@
 //   export DEEPSEEK_API_KEY=sk-xxx
 //   export ONEBOT_TOKEN=xxx   # SnowLuma 的 OneBot WS token
 //   node bin/fish-bot.mjs     # 默认连 ws://127.0.0.1:3001
-import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { Fish } from '../src/index.js';
 import { OneBotClient } from '../src/adapters/onebot.js';
 import { DeepSeekBrain } from '../src/brain.js';
@@ -16,7 +15,10 @@ import { createQQHandler } from '../src/qq-handler.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
-const home = process.env.FISH_HOME ?? join(homedir(), '.fish-os');
+// 默认使用仓库内的 data/naiwa（已被 .gitignore 排除），避免忘记设置 FISH_HOME 时以空记忆启动。
+const home = process.env.FISH_HOME ?? join(root, 'data', 'naiwa');
+// 可选：把收到的原始 OneBot 事件逐行追加到这个文件（JSONL），用于收集真实格式样本。含聊天原文，只存本地。
+const recordFile = process.env.ONEBOT_RECORD_FILE ?? '';
 const ws = process.env.ONEBOT_WS ?? 'ws://127.0.0.1:3001';
 const token = process.env.ONEBOT_TOKEN ?? '';
 const apiKey = process.env.DEEPSEEK_API_KEY ?? '';
@@ -38,8 +40,19 @@ const brain = new DeepSeekBrain({ apiKey, model });
 let client = null;
 const handleEvent = createQQHandler({ fish, brain, getClient: () => client, persona, socialRules });
 
+function record(ev) {
+  // 心跳每隔几秒一次，没有样本价值，不录。录制失败不能影响聊天。
+  if (!recordFile || (ev.post_type === 'meta_event' && ev.meta_event_type === 'heartbeat')) return;
+  try {
+    mkdirSync(dirname(recordFile), { recursive: true });
+    appendFileSync(recordFile, `${JSON.stringify({ receivedAt: Date.now(), event: ev })}\n`, { mode: 0o600 });
+  } catch (error) {
+    console.error(`[fish-bot] 录制事件失败：${error.message}`);
+  }
+}
+
 function newClient() {
-  return new OneBotClient({ url: ws, token, onEvent: (ev) => void handleEvent(ev) });
+  return new OneBotClient({ url: ws, token, onEvent: (ev) => { record(ev); void handleEvent(ev); } });
 }
 
 // 断线自动重连（指数退避）+ 进程保活：WS 断了不退出，一直重试。
@@ -65,5 +78,5 @@ async function connectLoop() {
   }
 }
 
-console.log(`[fish-bot] ${fish.character.name} 醒来 ｜ 模型=${model} ｜ 记忆库=${home}`);
+console.log(`[fish-bot] ${fish.character.name} 醒来 ｜ 模型=${model} ｜ 记忆库=${home}${recordFile ? ` ｜ 录制=${recordFile}` : ''}`);
 await connectLoop();
