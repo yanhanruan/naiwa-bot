@@ -40,12 +40,14 @@ export const PLATFORMS = new Set([
   'character-os',
 ]);
 
-// 隐私可见性：self / public / private:<peerId> / group:<groupId>
+// 隐私可见性：self / public / private:<peerId> / group:<groupId> / conversation:<conversationKey>
+// conversation 表示“只在这个会话里可见”（私聊或群聊均可），与“属于某个人”的 private 是不同语义。
 export const scope = {
   SELF: 'self',
   PUBLIC: 'public',
   private: (peerId) => `private:${peerId}`,
   group: (groupId) => `group:${groupId}`,
+  conversation: (conversationKey) => `conversation:${conversationKey}`,
 };
 
 export function clamp01(n) {
@@ -114,6 +116,7 @@ export function visibleTo(rec, requester) {
   const a = rec.access;
   if (a === 'public') return true;
   if (a === `private:${requester}`) return true;
+  if (a === `conversation:${requester}`) return true;
   if (a.startsWith('group:')) {
     return (rec.peers || []).includes(requester);
   }

@@ -121,7 +121,7 @@ fish.bridge.getStatus();   // 结构化状态
 ## 记忆类型与隐私
 
 - 类型：`episodic`（情节）/ `semantic`（语义）/ `relational`（关系）/ `interest`（兴趣）/ `self`（自我）
-- 可见性：`self` / `public` / `private:<peerId>` / `group:<groupId>`
+- 可见性：`self` / `public` / `private:<peerId>` / `group:<groupId>` / `conversation:<会话key>`（只在该会话可见，QQ 情节记忆使用）
 - 支持：检索（重要性+新鲜度+关键词打分）、摘要、去重、遗忘、导出、删除
 - **隐私隔离**：`retrieve(requester)` 只返回对该请求者可见的记忆，用户之间互不泄露
 

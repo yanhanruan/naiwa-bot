@@ -23,15 +23,30 @@
  *   invalid 表示已知类型（text/at/reply）的字段损坏，已降级保留原始数据
  */
 
+/**
+ * 会话内代号簿：按首次出现顺序把用户 key 映射成 u1、u2…。
+ * 模型只看到代号，看不到 QQ 号或内部 key，避免在回复里复述号码；真实 key 只留在程序内部。
+ * 代号与短期历史一样只在进程内有效，重启后重新编号。
+ * @returns {(userKey: string) => string}
+ */
+export function createAliasBook() {
+  const aliases = new Map();
+  return (userKey) => {
+    if (!aliases.has(userKey)) aliases.set(userKey, `u${aliases.size + 1}`);
+    return aliases.get(userKey);
+  };
+}
+
 // 模型只收到显示所需的字段。昵称和消息正文仍是用户输入，不授予任何权限。
-// 会话标识每轮相同，放在系统提示里；同一会话内消息 ID 已唯一，不重复发送完整 key。
-function segmentForModel(segment) {
+// 会话信息每轮相同，放在系统提示里；同一会话内消息 ID 已唯一，不重复发送完整 key。
+function segmentForModel(segment, message, aliasOf) {
   switch (segment.type) {
-    case 'mention':
+    case 'mention': {
       if (segment.target === 'all') return { type: 'mention', target: 'all' };
-      return segment.name
-        ? { type: 'mention', userKey: segment.userKey, name: segment.name }
-        : { type: 'mention', userKey: segment.userKey };
+      if (segment.userId === message.account.id) return { type: 'mention', toYou: true };
+      const mention = { type: 'mention', alias: aliasOf(segment.userKey) };
+      return segment.name ? { ...mention, name: segment.name } : mention;
+    }
     case 'reply':
       return { type: 'reply', messageId: segment.messageId };
     case 'opaque':
@@ -41,11 +56,15 @@ function segmentForModel(segment) {
   }
 }
 
-/** @param {InboundMessage} message */
-export function messageForModel(message) {
+/**
+ * @param {InboundMessage} message
+ * @param {(userKey: string) => string} aliasOf 本会话的代号簿，见 createAliasBook()
+ */
+export function messageForModel(message, aliasOf) {
+  if (typeof aliasOf !== 'function') throw new TypeError('messageForModel: aliasOf is required');
   return JSON.stringify({
-    sender: { key: message.sender.key, name: message.sender.displayName },
+    sender: { alias: aliasOf(message.sender.key), name: message.sender.displayName },
     messageId: message.id,
-    segments: message.segments.map(segmentForModel),
+    segments: message.segments.map((segment) => segmentForModel(segment, message, aliasOf)),
   });
 }

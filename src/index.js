@@ -11,4 +11,4 @@ export { DeepSeekBrain } from './brain.js';
 export * from './schema.js';
 export * from './identity.js';
 export { normalizeOneBotMessage } from './adapters/onebot-message.js';
-export { messageForModel } from './message.js';
+export { messageForModel, createAliasBook } from './message.js';

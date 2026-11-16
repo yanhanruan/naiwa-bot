@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Fish, entityKey, conversationKey, normalizeOneBotMessage, messageForModel } from '../src/index.js';
+import {
+  Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook,
+} from '../src/index.js';
 import { createQQHandler } from '../src/qq-handler.js';
 
 function event(overrides = {}) {
@@ -70,7 +72,8 @@ test('保留消息段顺序、@、引用与非文本内容，不修改上游事�
   assert.equal(normalized.text, ' 看这个 ');
   normalized.segments[3].data.extension.flag = false;
   assert.equal(input.message[3].data.extension.flag, true);
-  const modelInput = JSON.parse(messageForModel(normalized));
+  const modelInput = JSON.parse(messageForModel(normalized, createAliasBook()));
+  assert.deepEqual(modelInput.segments[1], { type: 'mention', toYou: true });
   assert.deepEqual(modelInput.segments[3], { type: 'uninterpreted', sourceType: 'image' });
 });
 
@@ -135,21 +138,23 @@ test('单个已知消息段字段损坏只降级该段，正文仍保留', () =>
   assert.equal(message.mentionsSelf, false);
 });
 
-test('@ 段保留显示名；模型信封精简但仍区分发言者和引用目标', () => {
+test('@ 段保留显示名；模型信封用会话内代号区分发言者和被 @ 的人', () => {
   const message = normalizeOneBotMessage(event({ message_id: 5,
-    message: '[CQ:reply,id=3][CQ:at,qq=102,name=小乙][CQ:at,qq=103]看' }));
+    message: '[CQ:reply,id=3][CQ:at,qq=102,name=小乙][CQ:at,qq=103][CQ:at,qq=101]看' }));
   assert.equal(message.segments[1].name, '小乙');
   assert.equal(message.segments[2].name, null);
-  const envelope = JSON.parse(messageForModel(message));
+  const envelope = JSON.parse(messageForModel(message, createAliasBook()));
   assert.deepEqual(envelope, {
-    sender: { key: 'qq:user:101', name: '甲的群名片' }, messageId: '5',
+    sender: { alias: 'u1', name: '甲的群名片' }, messageId: '5',
     segments: [
       { type: 'reply', messageId: '3' },
-      { type: 'mention', userKey: 'qq:user:102', name: '小乙' },
-      { type: 'mention', userKey: 'qq:user:103' },
+      { type: 'mention', alias: 'u2', name: '小乙' },
+      { type: 'mention', alias: 'u3' },
+      { type: 'mention', alias: 'u1' },
       { type: 'text', text: '看' },
     ],
   });
+  assert.throws(() => messageForModel(message), TypeError);
 });
 
 function setup(t) {
@@ -187,9 +192,9 @@ test('真实入口函数：群聊保留每轮发言者，关系属于个人', as
   await h.handle(event());
   await h.handle(event({ user_id: 102, message_id: 2, sender: { nickname: '小乙' }, message: '我是小乙' }));
   const users = userMessages(h.requests[1]);
-  assert.deepEqual(users.map((m) => m.sender.key), ['qq:user:101', 'qq:user:102']);
+  assert.deepEqual(users.map((m) => m.sender.alias), ['u1', 'u2']);
   assert.deepEqual(users.map((m) => m.sender.name), ['甲的群名片', '小乙']);
-  assert.ok(h.requests[1][0].content.includes('qq:account:900:conversation:group:200'));
+  assert.ok(h.requests[1][0].content.includes('## 当前会话\n群聊'));
   assert.deepEqual(h.fish.character.state().relationships.map((r) => r.peerId), ['qq:user:101', 'qq:user:102']);
   assert.equal(h.fish.character.getRelationship('qq:user:101').name, '小甲');
   const stored = h.fish.memory.export();
@@ -208,7 +213,7 @@ test('真实入口函数：不同机器人账号、不同群的历史隔离', as
 test('真实入口函数：同一人先私聊后群聊，不以个人私有权限检索群上下文', async (t) => {
   const h = setup(t);
   const privateScope = conversationKey('qq', 900, 'private', 101);
-  h.fish.remember({ type: 'semantic', content: '私聊专属内容', access: `private:${privateScope}` });
+  h.fish.remember({ type: 'semantic', content: '私聊专属内容', access: scope.conversation(privateScope) });
   await h.handle(event({ message_type: 'private', message: '私聊专属内容' }));
   await h.handle(event({ message_id: 2, message: '你好' }));
   assert.ok(h.requests[0][0].content.includes('私聊专属内容'));
@@ -290,15 +295,87 @@ test('相同聊天内容在不同群、私聊和机器人账号下分别保存�
   }
 });
 
-test('系统提示中的机器人用户标识与实际 @ 消息一致，随账号变化', async (t) => {
+test('@ 当前机器人账号标为 toYou，随账号变化；@ 另一个机器人账号只是普通成员', async (t) => {
   const h = setup(t);
   for (const account of [900, 901]) {
-    await h.handle(event({ self_id: account, message: `[CQ:at,qq=${account}]你好` }));
-    const request = h.requests.at(-1);
-    const mention = userMessages(request).at(-1).segments.find((s) => s.type === 'mention');
-    const selfUserKey = /^用户标识：(.+)$/m.exec(request[0].content)?.[1];
-    assert.equal(selfUserKey, mention.userKey);
-    assert.ok(request[0].content.includes(`qq:account:${account}`));
-    assert.ok(!request[0].content.includes(`qq:account:${account}（@ 这个 key 就是在叫你）`));
+    await h.handle(event({ self_id: account, message: `[CQ:at,qq=${account}][CQ:at,qq=${1801 - account}]你好` }));
+    const [self, other] = userMessages(h.requests.at(-1)).at(-1).segments;
+    assert.deepEqual(self, { type: 'mention', toYou: true });
+    assert.equal(other.toYou, undefined);
+    assert.match(other.alias, /^u\d+$/);
   }
+});
+
+test('模型请求中不出现原始 QQ 号或内部 key；代号在会话内稳定、因人而异', async (t) => {
+  const h = setup(t);
+  const ids = { self_id: 77703, group_id: 66602 };
+  await h.handle(event({ ...ids, user_id: 55501, message_id: 1, sender: { nickname: '甲' }, message: '鲸鱼好大' }));
+  await h.handle(event({ ...ids, user_id: 55502, message_id: 2, sender: { nickname: '乙' },
+    message: '[CQ:reply,id=1][CQ:at,qq=55501][CQ:at,qq=77703]真的' }));
+  await h.handle(event({ ...ids, user_id: 55501, message_id: 3, sender: { nickname: '甲' }, message: '对吧' }));
+  await h.handle(event({ ...ids, message_type: 'private', sub_type: 'friend', user_id: 55501, message_id: 4,
+    sender: { nickname: '甲' }, message: '私聊一下' }));
+
+  const all = JSON.stringify(h.requests);
+  for (const raw of ['77703', '66602', '55501', '55502', 'qq:']) assert.ok(!all.includes(raw), `leaked ${raw}`);
+
+  const turns = userMessages(h.requests[2]);
+  assert.deepEqual(turns.map((m) => m.sender.alias), ['u1', 'u2', 'u1']);
+  assert.deepEqual(turns[1].segments.slice(1, 3), [
+    { type: 'mention', alias: 'u1' }, { type: 'mention', toYou: true },
+  ]);
+  // 记忆按会话内代号标注发言者；内部仍保存真实 key 供程序使用。
+  assert.match(h.requests[2][0].content, /- \[episodic · u1\] 甲说「鲸鱼好大」/);
+  assert.equal(h.fish.memory.export()[0].meta.senderKey, 'qq:user:55501');
+  assert.deepEqual(userMessages(h.requests[3]).map((m) => m.sender.alias), ['u1']);
+});
+
+test('会话记忆使用 conversation 范围：只对该会话可见，不对个人或其他会话可见', async (t) => {
+  const h = setup(t);
+  await h.handle(event());
+  const [record] = h.fish.memory.export();
+  const conversation = 'qq:account:900:conversation:group:200';
+  assert.equal(record.access, `conversation:${conversation}`);
+  assert.equal(scope.conversation(conversation), record.access);
+  assert.ok(visibleTo(record, conversation));
+  assert.ok(!visibleTo(record, 'qq:user:101'));
+  assert.ok(!visibleTo(record, 'qq:account:900:conversation:group:201'));
+  assert.ok(!visibleTo(record, `private:${conversation}`));
+});
+
+test('自我记忆只注入 self 范围的记录，不借 self 身份读到其他会话的私有记录', async (t) => {
+  const h = setup(t);
+  const dm = conversationKey('qq', 900, 'private', 101);
+  h.fish.remember({ type: 'self', content: '只属于私聊的自我记录', access: scope.conversation(dm) });
+  h.fish.remember({ type: 'self', content: '奶蛙今天学会了游泳', access: scope.SELF });
+  await h.handle(event({ group_id: 555 }));
+  const prompt = h.requests[0][0].content;
+  assert.ok(!prompt.includes('只属于私聊的自我记录'));
+  assert.ok(prompt.includes('奶蛙今天学会了游泳'));
+});
+
+test('回复已发出后保存失败：用户收到真实回复，错误只记日志', async (t) => {
+  const h = setup(t);
+  h.fish.remember = () => { throw new Error('ENOSPC'); };
+  await h.handle(event());
+  assert.deepEqual(h.sent.map((s) => s.message[0].data.text), ['收到']);
+  assert.deepEqual(h.errors.map((e) => e.error.message), ['ENOSPC']);
+});
+
+test('发送失败不记录：历史、记忆和关系都不把未送达的回复当成已发生', async (t) => {
+  const h = setup(t);
+  const client = { sendGroupMsg: async () => { throw new Error('未连接'); } };
+  const handle = createQQHandler({
+    fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色',
+    onError: (stage, error) => h.errors.push({ stage, error }),
+  });
+  await handle(event({ message: '第一句' }));
+  assert.deepEqual(h.errors.map((e) => e.error.message), ['未连接']);
+  assert.equal(h.fish.memory.count(), 0);
+  assert.equal(h.fish.character.state().relationships.length, 0);
+
+  await h.handle(event({ message_id: 2, message: '第二句' }));
+  const history = h.requests[1].filter((m) => m.role !== 'system');
+  assert.equal(history.length, 1);
+  assert.ok(!JSON.stringify(history).includes('第一句'));
 });
