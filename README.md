@@ -4,9 +4,9 @@
 
 > **当前状态（2026-11）**：本仓库的 QQ bot 是「奶蛙」——SnowLuma(OneBot v11) + DeepSeek Responses API（服务端 web_search）。架构与消息流见 [docs/architecture.md](docs/architecture.md)。
 
-> 纯 ESM，Node ≥ 20.3。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite），`npm test` 不需要启动任何服务。
+> 纯 ESM，Node ≥ 22.4（用到内置的 WebSocket）。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite）和本地假 OneBot 服务端，`npm test` 不需要启动任何服务。
 
-> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
+> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
 
 ## 架构
 
@@ -48,10 +48,17 @@ naiwa-bot/
 │   ├── scheduler.js        # 主动调度
 │   ├── bridge.js           # Character OS Bridge
 │   ├── fish.js             # 顶层编排
+│   ├── qq-handler.js       # QQ 消息处理（召回记忆、调模型、发送、记录）
+│   ├── log.js              # 结构化日志
 │   ├── adapters/
-│   │   └── bilibili.js     # B站只读适配器（热门/搜索）
+│   │   ├── onebot.js         # OneBot v11 客户端（重连、超时、假活探测）
+│   │   ├── send-throttle.js  # 发送节流
+│   │   ├── onebot-errors.js  # 请求失败的错误分类
+│   │   ├── onebot-message.js # OneBot 事件 → 入站消息
+│   │   └── bilibili.js       # B站只读适配器（热门/搜索）
 │   └── index.js
 ├── bin/
+│   ├── fish-bot.mjs        # QQ 机器人入口（奶蛙）
 │   ├── fish.mjs            # CLI
 │   └── fish-daemon.mjs     # 长驻进程（主动调度心跳）
 ├── migrations/             # 编号的 SQL 迁移（001_init.sql …）
@@ -151,10 +158,12 @@ npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 
 设置 `TEST_DATABASE_URL`（指向一个**专用的测试数据库**）时，存储测试还会在真实 PostgreSQL 上再跑一遍，验证多连接并发。
 
+OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`）扮演 SnowLuma，覆盖断线重连、超时、假活、坏数据和发送节流，见 [Module 3 导读](docs/module-03-onebot.md)。
+
 ## 诚实的状态标注
 
 - ✅ 已实现并测试：人格引擎、长期记忆（含隐私隔离/导出/删除）、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
-- ✅ QQ 传输层复用已安装的 `@tencent-connect/dsh-qqbot`（官方 QQ 机器人通道），已实测建过会话。
+- ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。
 - ✅ B站只读内容获取（Phase 2 之一）：热门 + 搜索真实拉取，转成统一 `content.read` 事件。
 - ✅ 存储：PostgreSQL + 编号迁移 + pg_dump 备份/恢复 + 旧 JSON 导入（Module 2）。
 - ⬜ 尚未接通：小红书/抖音只读（需账号/签名授权）、把 fish-os 记忆作为 DSH 工具注入 QQ 会话、LLM 摘要器/向量检索（当前规则检索 + 截断摘要，接口已预留）。

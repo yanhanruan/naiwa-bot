@@ -16,12 +16,13 @@
     "db:migrate": "node --env-file=.env -e \"import('./src/storage/index.js').then(async (s) => { const db = await s.openStorage({ migrateOnOpen: false }); console.log(await s.migrate(db)); await db.close(); })\""
   },
   "engines": {
-    "node": ">=20.3.0"
+    "node": ">=22.4.0"
   },
   "dependencies": {
     "pg": "8.23.1"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.13"
+    "@electric-sql/pglite": "0.5.13",
+    "ws": "8.22.1"
   }
 }

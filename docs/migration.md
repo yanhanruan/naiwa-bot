@@ -32,6 +32,7 @@ scripts/restore.sh backups/xxx.dump --yes   # 先停止机器人再恢复
 ## 日志与监控
 
 - 进程：daemon 打印启动/心跳/主动任务/关闭日志，接入 `journald` 或 docker 日志即可。
+- QQ 机器人（`bin/fish-bot.mjs`）输出结构化日志：在终端里是给人看的格式，在 Docker 等非终端环境里是每行一个 JSON，可用 `LOG_FORMAT` 强制指定。用 `LOG_LEVEL=debug` 能看到被忽略的消息和发送排队等待。按 `messageKey` 搜索，可以串起一条消息的完整处理过程。日志不含聊天正文。
 - 健康：`fish status` 返回结构化状态（情绪、策略开关、记忆/事件计数、已连平台），可作为健康检查/监控探针。
 - 失败降级：平台适配器（如 B站）网络异常会抛错，由调用方（daemon/平台调度）捕获记录，不拖垮主进程。
 

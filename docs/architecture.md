@@ -27,8 +27,8 @@
 │     · 当前时间  北京时间（问日期/时间直接答，不搜）            │
 │     · 短期历史  每个 peer 最近 6 条（3 轮）                    │
 │   → 调 DeepSeek Responses API                               │
-│   → 写记忆（data/naiwa）                                    │
-│   → 经 OneBot 发回 QQ（回复）                                │
+│   → 经 OneBot 发回 QQ（排队节流，逐条发送）                  │
+│   → 确认发出后写记忆（PostgreSQL）                           │
 └────────────────────────────────────────────────────────────┘
                                   │  POST /v1/responses
                                   │  model: deepseek-v4-pro
@@ -53,7 +53,7 @@ flowchart TD
   E -->|回复| D
   D -->|OneBot 发消息| C
   C -->|回复| A
-  D -->|读写| F[(data/naiwa<br/>memory / character / events)]
+  D -->|读写| F[(PostgreSQL<br/>memories / events / relationships …)]
 ```
 
 ## 各层职责
@@ -71,8 +71,20 @@ flowchart TD
 2. SnowLuma Hook 捕获 → 转成 OneBot v11 事件 → WS `:3001` 推给 fish-bot；
 3. fish-bot 检索该 peer 可见的记忆 + 拼 system prompt（人设/准则/记忆/时间/历史）；
 4. 调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成）；
-5. 拿到回复 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
+5. 拿到回复 → 进入发送节流队列 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
 6. 失败降级：搜索 500/超时 → 重试 → 退回不搜再答，不把错误抛给用户。
+
+## 传输层（OneBot 客户端）
+
+fish-bot 与 SnowLuma 之间只有一条正向 WebSocket 连接，由 `src/adapters/onebot.js` 维护：
+
+- 断线自动重连：指数退避，1 秒到 30 秒；
+- 每个请求都有超时；
+- 收不到数据时发 `get_status` 探测，发现假活连接就重连；
+- 坏数据只记日志，不会让进程崩溃；
+- 所有发送经过节流队列，相邻两条至少间隔 1.5 秒，每分钟最多 20 条。
+
+每条消息的处理过程用 `messageKey` 串在日志里。详见 [Module 3 导读](module-03-onebot.md)。
 
 ## 存储
 

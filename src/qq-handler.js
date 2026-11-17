@@ -3,6 +3,7 @@ import { normalizeId, messageKey } from './identity.js';
 import { normalizeOneBotMessage } from './adapters/onebot-message.js';
 import { seg } from './adapters/onebot.js';
 import { messageForModel, createAliasBook } from './message.js';
+import { createLogger } from './log.js';
 
 const FALLBACK_REPLY = '（咕噜…我卡了一下，稍后再试）';
 
@@ -30,9 +31,10 @@ const SENT_MESSAGE_LIMIT = 2000;
 // 本模块尚无队列、去重或参与决策；这些由后续 module 5 / 7 实现。
 // 群聊临时闸门：私聊总是回复；群聊只在被 @ 或有人引用奶蛙自己发出的消息时回复。
 // replyToAllGroupMessages 为 true 时恢复旧行为（群里每条含文本的消息都回复），仅供兼容；module 7 会替换这套规则。
+// 日志：每条被处理的消息都带 messageKey，依次记录 message.accepted → （各阶段失败）→ message.done。
+// 日志里不写聊天正文、回复内容和昵称，只写标识、长度、耗时和结果。
 export function createQQHandler({ fish, brain, getClient, persona, socialRules = '', now = () => new Date(),
-  onError = (stage, error) => console.error(`[fish-bot] ${stage}：`, error?.message ?? error),
-  replyToAllGroupMessages = false,
+  logger = createLogger(), replyToAllGroupMessages = false,
 }) {
   const histories = new Map(); // conversation.key -> 模型消息；用户关系使用 sender.key。
   const aliasBooks = new Map(); // conversation.key -> 会话内代号簿；与历史一样只在进程内有效。
@@ -97,10 +99,13 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
 
   async function send(message, reply) {
     const client = getClient();
+    if (!client) throw new Error('OneBot 客户端尚未创建');
+    const opts = { key: message.key };
     const result = message.conversation.kind === 'group'
-      ? await client.sendGroupMsg(message.source.targetId, [seg.text(reply)])
-      : await client.sendPrivateMsg(message.source.targetId, [seg.text(reply)]);
+      ? await client.sendGroupMsg(message.source.targetId, [seg.text(reply)], opts)
+      : await client.sendPrivateMsg(message.source.targetId, [seg.text(reply)], opts);
     rememberSent(message, result);
+    return result;
   }
 
   // 只在回复确实发出后调用：历史、情节记忆、关系都只记录已经发生的事。
@@ -122,38 +127,63 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   }
 
   return async function handleEvent(event) {
+    const startedAt = Date.now();
     let message;
     try {
       message = normalizeOneBotMessage(event);
     } catch (error) {
-      onError('入站消息格式错误', error);
+      logger.warn('message.invalid', { msg: '入站消息格式错误，已跳过', error });
       return;
     }
+    if (!message) return;
+    const log = logger.child({ messageKey: message.key });
     // 本轮保持原有“只对含文本的消息回复”的行为；纯图片/@ 的参与规则留待 module 7。
-    if (!message || !message.text.trim()) return;
+    if (!message.text.trim()) {
+      log.debug('message.ignored', { reason: 'no_text' });
+      return;
+    }
     // 没叫到奶蛙的群消息直接忽略：不调模型、不回复、不记录。
-    if (!isAddressed(message)) return;
+    if (!isAddressed(message)) {
+      log.debug('message.ignored', { reason: 'not_addressed' });
+      return;
+    }
+    log.info('message.accepted', { conversation: message.conversation.kind, textChars: message.text.length });
 
     let turn = null;
+    const replyStartedAt = Date.now();
     try {
       turn = await generateReply(message);
     } catch (error) {
-      onError('生成回复失败', error);
+      log.error('reply.failed', { msg: '生成回复失败，改发通用提示', error });
     }
+    const replyMs = Date.now() - replyStartedAt;
+    const outcome = turn ? 'replied' : 'fallback';
+
+    const sendStartedAt = Date.now();
+    let sent;
     try {
-      await send(message, turn?.reply ?? FALLBACK_REPLY);
+      sent = await send(message, turn?.reply ?? FALLBACK_REPLY);
     } catch (error) {
-      // 未送达就不记录；重试与发送状态留待 module 3 / 5。
-      onError('发送失败', error);
+      // 未送达（或不确定是否送达）就不记录；delivery 说明是否可能已发出，重试策略留待 module 5。
+      log.error('send.failed', { msg: '发送失败，本条不记录', error, delivery: error?.delivery ?? 'unknown' });
+      log.warn('message.done', { outcome: 'send_failed', replyMs, sendMs: Date.now() - sendStartedAt, totalMs: Date.now() - startedAt });
       return;
     }
+    const sendMs = Date.now() - sendStartedAt;
+
     // 降级提示不是角色的真实回复，不进入历史与记忆。
-    if (!turn) return;
-    try {
-      await record(message, turn);
-    } catch (error) {
-      // 回复已经发出，保存失败只记日志，不能再用降级提示顶替已发出的回复。
-      onError('保存记录失败', error);
+    let recorded = false;
+    if (turn) {
+      try {
+        await record(message, turn);
+        recorded = true;
+      } catch (error) {
+        // 回复已经发出，保存失败只记日志，不能再用降级提示顶替已发出的回复。
+        log.error('record.failed', { msg: '回复已发出，但保存记录失败', error });
+      }
     }
+    log.info('message.done', {
+      outcome, recorded, sentMessageId: sent?.message_id, replyChars: turn?.reply.length, replyMs, sendMs, totalMs: Date.now() - startedAt,
+    });
   };
 }

@@ -1,10 +1,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook,
+  Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook, OneBotError,
 } from '../src/index.js';
 import { createQQHandler } from '../src/qq-handler.js';
-import { openFish, testDb, closeTestDb } from './helpers.js';
+import { openFish, testDb, closeTestDb, captureLogger } from './helpers.js';
 
 after(closeTestDb);
 
@@ -160,19 +160,22 @@ test('@ 段保留显示名；模型信封用会话内代号区分发言者和被
 // 多数入口测试关注身份与记录，不关心群聊闸门，因此默认沿用“群里每条都回复”的兼容模式；闸门有单独测试。
 async function setup(t, { replyToAllGroupMessages = true } = {}) {
   const fish = await openFish();
-  const requests = [], sent = [], errors = [];
+  const requests = [], sent = [];
+  const logs = captureLogger();
+  // 警告和错误级别的日志，相当于原来的 onError 收集到的内容。
+  const errors = { get list() { return logs.entries.filter((e) => e.level === 'warn' || e.level === 'error'); } };
   const brain = { chat: async (messages) => { requests.push(messages); return '收到'; } };
   // 模拟 OneBot 的发送结果：返回新消息的 message_id。
   const client = {
-    sendGroupMsg: async (id, message) => ({ message_id: 9000 + sent.push({ kind: 'group', id, message }) }),
-    sendPrivateMsg: async (id, message) => ({ message_id: 9000 + sent.push({ kind: 'private', id, message }) }),
+    sendGroupMsg: async (id, message, opts) => ({ message_id: 9000 + sent.push({ kind: 'group', id, message, opts }) }),
+    sendPrivateMsg: async (id, message, opts) => ({ message_id: 9000 + sent.push({ kind: 'private', id, message, opts }) }),
   };
   const handle = createQQHandler({
     fish, brain, getClient: () => client, persona: '测试角色',
-    now: () => new Date('2026-11-12T00:00:00Z'), onError: (stage, error) => errors.push({ stage, error }),
+    now: () => new Date('2026-11-12T00:00:00Z'), logger: logs.logger,
     replyToAllGroupMessages,
   });
-  return { fish, handle, requests, sent, errors, brain };
+  return { fish, handle, requests, sent, get errors() { return errors.list; }, brain, logs };
 }
 
 const userMessages = (request) => request.filter((m) => m.role === 'user').map((m) => JSON.parse(m.content));
@@ -265,6 +268,7 @@ test('入口模型失败记录内部错误，聊天对象只收到通用提示',
   const h = await setup(t);
   h.brain.chat = async () => { throw new Error('internal-provider-details'); };
   await h.handle(event());
+  assert.equal(h.errors[0].event, 'reply.failed');
   assert.equal(h.errors[0].error.message, 'internal-provider-details');
   assert.equal(h.sent.length, 1);
   assert.ok(!JSON.stringify(h.sent).includes('internal-provider-details'));
@@ -368,10 +372,10 @@ test('发送失败不记录：历史、记忆和关系都不把未送达的回�
   const client = { sendGroupMsg: async () => { throw new Error('未连接'); } };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色',
-    onError: (stage, error) => h.errors.push({ stage, error }), replyToAllGroupMessages: true,
+    logger: h.logs.logger, replyToAllGroupMessages: true,
   });
   await handle(event({ message: '第一句' }));
-  assert.deepEqual(h.errors.map((e) => e.error.message), ['未连接']);
+  assert.deepEqual(h.logs.find('send.failed').map((e) => e.error.message), ['未连接']);
   assert.equal(await h.fish.memory.count(), 0);
   assert.equal((await h.fish.character.state()).relationships.length, 0);
 
@@ -404,4 +408,52 @@ test('群聊闸门：被 @ 时回复；引用奶蛙自己发出的消息时回�
   // 另一个群里同样编号的消息不是奶蛙在这个群发的，不算引用奶蛙。
   await h.handle(event({ group_id: 201, message_id: 4, message: '[CQ:reply,id=9001]嗯' }));
   assert.equal(h.sent.length, 2);
+});
+
+test('日志：处理的每条消息按 messageKey 串起各阶段，不写正文、回复和昵称', async (t) => {
+  const h = await setup(t);
+  h.brain.chat = async () => '这是一条很私密的回复内容';
+  await h.handle(event({ message: '我的银行卡密码是一二三', sender: { nickname: '真名小明', card: '群名片小明' } }));
+  const key = 'qq:account:900:conversation:group:200:message:1';
+  assert.deepEqual(h.logs.entries.filter((e) => e.messageKey === key).map((e) => e.event), ['message.accepted', 'message.done']);
+  const [done] = h.logs.find('message.done');
+  assert.equal(done.outcome, 'replied');
+  assert.equal(done.recorded, true);
+  assert.equal(done.sentMessageId, 9001);
+  assert.ok(Number.isInteger(done.totalMs) && Number.isInteger(done.replyMs) && Number.isInteger(done.sendMs));
+  const all = h.logs.lines.join('\n');
+  for (const secret of ['银行卡密码', '私密的回复', '真名小明', '群名片小明']) assert.ok(!all.includes(secret), secret);
+  // 发送时把消息 key 交给传输层，传输层的日志（排队、超时）也能按它关联。
+  assert.deepEqual(h.sent[0].opts, { key });
+});
+
+test('日志：没叫到奶蛙或没有文字的消息，只在 debug 级别记下忽略原因', async (t) => {
+  const h = await setup(t, { replyToAllGroupMessages: false });
+  await h.handle(event({ message: '大家好' }));
+  await h.handle(event({ message_id: 2, message: [{ type: 'image', data: { file: 'x.jpg' } }] }));
+  assert.deepEqual(h.logs.entries.map((e) => [e.level, e.event, e.reason]), [
+    ['debug', 'message.ignored', 'not_addressed'],
+    ['debug', 'message.ignored', 'no_text'],
+  ]);
+});
+
+test('发送结果未知（超时）：不记录，日志标明 delivery=unknown', async (t) => {
+  const h = await setup(t);
+  const client = {
+    sendGroupMsg: async () => {
+      throw new OneBotError('TIMEOUT', 'send_group_msg 超过 15000ms 没有响应，结果未知', { delivery: 'unknown', action: 'send_group_msg' });
+    },
+  };
+  const handle = createQQHandler({
+    fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色', logger: h.logs.logger, replyToAllGroupMessages: true,
+  });
+  await handle(event());
+  const [failed] = h.logs.find('send.failed');
+  assert.equal(failed.delivery, 'unknown');
+  assert.equal(failed.error.code, 'TIMEOUT');
+  const [done] = h.logs.find('message.done');
+  assert.equal(done.level, 'warn');
+  assert.equal(done.outcome, 'send_failed');
+  assert.equal(await h.fish.memory.count(), 0);
+  assert.equal((await h.fish.character.state()).relationships.length, 0);
 });
