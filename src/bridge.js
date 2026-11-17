@@ -1,4 +1,5 @@
 import { validateCharacterState } from './schema.js';
+import { moodLabel } from './character.js';
 
 // Character OS Bridge：对外暴露结构化角色状态 / 记忆 / 意图执行接口。
 export class Bridge {
@@ -7,25 +8,25 @@ export class Bridge {
   }
 
   // 查询角色当前情绪与状态（结构化，符合 schema）。
-  getCharacterState() {
-    const st = this.fish.character.state();
+  async getCharacterState() {
+    const st = await this.fish.character.state();
     const v = validateCharacterState(st);
     if (!v.ok) throw new Error(`invalid character state: ${v.errors.join('; ')}`);
     return st;
   }
 
   // 完整运行状态（含策略开关、记忆/事件计数），供 Character OS 或监控使用。
-  getStatus() {
+  async getStatus() {
     return {
-      character: this.getCharacterState(),
+      character: await this.getCharacterState(),
       policy: {
         proactiveEnabled: this.fish.policy.proactiveEnabled,
         publishApprovalRequired: this.fish.policy.publishApprovalRequired,
         dmApprovalRequired: this.fish.policy.dmApprovalRequired,
         pendingApprovals: this.fish.policy.pendingCount(),
       },
-      memory: { count: this.fish.memory.count() },
-      events: { count: this.fish.events.count() },
+      memory: { count: await this.fish.memory.count() },
+      events: { count: await this.fish.events.count() },
       platforms: this.fish.connectedPlatforms ?? [],
     };
   }
@@ -36,13 +37,14 @@ export class Bridge {
   }
 
   // 输出可供 Character OS 使用的结构化情绪/动作指令。
-  express(intent = {}) {
+  async express(intent = {}) {
     const c = this.fish.character;
-    const mood = c.moodLabel();
+    const moodVector = await c.getMood();
+    const mood = moodLabel(moodVector);
     return {
       intent: intent.intent ?? 'chat',
       mood,
-      moodVector: { ...c.mood },
+      moodVector,
       style: c.persona.style,
       tone: c.persona.tone,
       expression: this._render(intent, mood),
@@ -62,12 +64,12 @@ export class Bridge {
   }
 
   // 执行一个意图（统一工具调用接口）。写操作走审批，读/回复直接执行。
-  act(intent = {}) {
+  async act(intent = {}) {
     const fish = this.fish;
     const check = fish.policy.check(intent);
     if (check.needsApproval) {
       const req = fish.policy.requestApproval(intent);
-      fish.events.append({
+      await fish.events.append({
         kind: 'approval.requested',
         platform: intent.platform ?? 'fish-os',
         target: intent.target ?? null,
@@ -79,7 +81,7 @@ export class Bridge {
     if (!check.ok) {
       return { ok: false, approved: false, reason: check.reason };
     }
-    fish.events.append({
+    await fish.events.append({
       kind: intent.type === 'proactive' ? 'proactive.action' : 'message.sent',
       platform: intent.platform ?? 'fish-os',
       target: intent.target ?? null,
@@ -89,11 +91,11 @@ export class Bridge {
     return { ok: true, approved: true, action: intent };
   }
 
-  approve(id) {
+  async approve(id) {
     const fish = this.fish;
     const res = fish.policy.approve(id);
     if (res.ok) {
-      fish.events.append({
+      await fish.events.append({
         kind: 'approval.granted',
         platform: 'fish-os',
         payload: { approvalId: id, action: res.request.action },
@@ -103,11 +105,11 @@ export class Bridge {
     return res;
   }
 
-  deny(id) {
+  async deny(id) {
     const fish = this.fish;
     const res = fish.policy.deny(id);
     if (res.ok) {
-      fish.events.append({
+      await fish.events.append({
         kind: 'approval.denied',
         platform: 'fish-os',
         payload: { approvalId: id, action: res.request.action },

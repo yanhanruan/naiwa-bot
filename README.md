@@ -4,9 +4,9 @@
 
 > **当前状态（2026-11）**：本仓库的 QQ bot 是「奶蛙」——SnowLuma(OneBot v11) + DeepSeek Responses API（服务端 web_search）。架构与消息流见 [docs/architecture.md](docs/architecture.md)。
 
-> 零外部依赖，纯 ESM，Node ≥ 20.3，`node --test` 直接跑。
+> 纯 ESM，Node ≥ 20.3。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite），`npm test` 不需要启动任何服务。
 
-> **模块改造进度**：Module 1 已实现身份与入站消息模型，等待 review。设计、基础知识、验收和未完成边界见 [Module 1 导读](docs/module-01-identity.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
+> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
 
 ## 架构
 
@@ -33,14 +33,14 @@
 ## 目录
 
 ```
-fish-os/
+naiwa-bot/
 ├── package.json
 ├── README.md
 ├── persona/naiwa.md        # 奶蛙人设（当前）
 ├── persona/social-rules.md # 聊天行为准则（最高优先级）
 ├── src/
 │   ├── schema.js           # 统一事件/记忆/状态格式 + 隐私可见性
-│   ├── store.js            # JSON 原子持久化
+│   ├── storage/            # PostgreSQL 连接、迁移执行器、旧 JSON 导入
 │   ├── eventstore.js       # 事件存储
 │   ├── memory.js           # 长期记忆服务
 │   ├── character.js        # 人格引擎
@@ -54,20 +54,25 @@ fish-os/
 ├── bin/
 │   ├── fish.mjs            # CLI
 │   └── fish-daemon.mjs     # 长驻进程（主动调度心跳）
+├── migrations/             # 编号的 SQL 迁移（001_init.sql …）
 ├── scripts/
-│   ├── backup.sh           # 备份数据目录
-│   └── restore.sh          # 恢复数据目录
+│   ├── backup.sh           # pg_dump 备份
+│   ├── restore.sh          # pg_restore 恢复
+│   └── import-json.mjs     # 旧版 JSON 数据导入
 ├── Dockerfile              # Linux/Docker 镜像
-├── docker-compose.yml      # 数据卷长驻运行
+├── docker-compose.yml      # PostgreSQL（db）+ 可选守护进程
 ├── docs/
 │   └── migration.md        # Linux/Docker 迁移
-└── test/fish.test.js       # 验收测试
+└── test/                   # 验收与回归测试
 ```
 
 ## 快速开始（CLI）
 
+先准备数据库（详见 [Module 2 导读](docs/module-02-storage.md)）：在 `.env` 里设置 `POSTGRES_PASSWORD` 和 `DATABASE_URL`，然后 `docker compose up -d db`。
+
 ```bash
-cd fish-os
+cd naiwa-bot
+npm install
 
 # 结构化状态（Character OS Bridge）
 node bin/fish.mjs status
@@ -96,22 +101,27 @@ node bin/fish.mjs approve <id>
 node bin/fish.mjs proactive-on   # / proactive-off
 ```
 
-数据默认存 `~/.fish-os`，可用 `FISH_HOME` 环境变量指定。
+命令通过 `DATABASE_URL` 连接 PostgreSQL（`npm run fish -- status` 会自动读取 `.env`）。连不上数据库时直接报错退出。
 
 ## API
 
 ```js
 import { Fish, scope } from './src/index.js';
 
-const fish = new Fish({ home: './data', name: '奶蛙', persona: { core: '...' } }).start();
+import { openStorage } from './src/storage/index.js';
 
-fish.reactTo({ platform: 'qq', kind: 'message.received', actor: 'peerA', payload: { text: 'hi', sentiment: 'positive' } });
-fish.remember({ type: 'episodic', content: '...', access: 'public', tags: ['x'] });
-fish.remember({ type: 'episodic', content: 'A 的私事', access: scope.private('A'), peers: ['A'] });
-fish.recall({ query: '...', requester: 'A' });   // 自动按隐私隔离
-fish.touch('peerA', { name: '小明', deltaSentiment: 0.2 });
-fish.bridge.act({ type: 'publish', platform: 'bilibili', target: '评论', text: '...' });
-fish.bridge.getStatus();   // 结构化状态
+const db = await openStorage({ databaseUrl: process.env.DATABASE_URL }); // 连接并执行迁移
+const fish = await (await Fish.open({ db, name: '奶蛙', persona: { core: '...' } })).start();
+
+// 涉及存储的方法都是异步的
+await fish.reactTo({ platform: 'qq', kind: 'message.received', actor: 'peerA', payload: { text: 'hi', sentiment: 'positive' } });
+await fish.remember({ type: 'episodic', content: '...', access: 'public', tags: ['x'] });
+await fish.remember({ type: 'episodic', content: 'A 的私事', access: scope.private('A'), peers: ['A'] });
+await fish.recall({ query: '...', requester: 'A' });   // 自动按隐私隔离
+await fish.touch('peerA', { name: '小明', deltaSentiment: 0.2 });
+await fish.bridge.act({ type: 'publish', platform: 'bilibili', target: '评论', text: '...' });
+await fish.bridge.getStatus();   // 结构化状态
+await db.close();
 ```
 
 ## 统一事件格式
@@ -137,12 +147,14 @@ fish.bridge.getStatus();   // 结构化状态
 npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 ```
 
-覆盖验收项：① 连续人格稳定 + 情绪变化 ② 重启恢复记忆 ⑤ 统一事件结构 ⑥ 未经批准不发布/私信 ⑦ 记忆导出删除 ⑧ Bridge 结构化状态，外加隐私隔离、去重、关系记忆、主动开关。
+覆盖验收项：① 连续人格稳定 + 情绪变化 ② 重启恢复记忆 ⑤ 统一事件结构 ⑥ 未经批准不发布/私信 ⑦ 记忆导出删除 ⑧ Bridge 结构化状态，外加隐私隔离、去重、关系记忆、主动开关，以及存储层的并发写入、租户隔离、迁移回滚和旧数据导入。
+
+设置 `TEST_DATABASE_URL`（指向一个**专用的测试数据库**）时，存储测试还会在真实 PostgreSQL 上再跑一遍，验证多连接并发。
 
 ## 诚实的状态标注
 
 - ✅ 已实现并测试：人格引擎、长期记忆（含隐私隔离/导出/删除）、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
 - ✅ QQ 传输层复用已安装的 `@tencent-connect/dsh-qqbot`（官方 QQ 机器人通道），已实测建过会话。
 - ✅ B站只读内容获取（Phase 2 之一）：热门 + 搜索真实拉取，转成统一 `content.read` 事件。
-- ✅ Linux/Docker 迁移准备：Dockerfile + compose + 长驻 daemon + 备份/恢复脚本。
+- ✅ 存储：PostgreSQL + 编号迁移 + pg_dump 备份/恢复 + 旧 JSON 导入（Module 2）。
 - ⬜ 尚未接通：小红书/抖音只读（需账号/签名授权）、把 fish-os 记忆作为 DSH 工具注入 QQ 会话、LLM 摘要器/向量检索（当前规则检索 + 截断摘要，接口已预留）。

@@ -3,11 +3,13 @@
 // 用法：
 //   export DEEPSEEK_API_KEY=sk-xxx
 //   export ONEBOT_TOKEN=xxx   # SnowLuma 的 OneBot WS token
+//   export DATABASE_URL=postgres://...   # PostgreSQL（见 docker-compose.yml 的 db 服务）
 //   node bin/fish-bot.mjs     # 默认连 ws://127.0.0.1:3001
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { Fish } from '../src/index.js';
+import { openStorage } from '../src/storage/index.js';
 import { OneBotClient } from '../src/adapters/onebot.js';
 import { DeepSeekBrain } from '../src/brain.js';
 import { createQQHandler } from '../src/qq-handler.js';
@@ -15,8 +17,6 @@ import { createQQHandler } from '../src/qq-handler.js';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 
-// 默认使用仓库内的 data/naiwa（已被 .gitignore 排除），避免忘记设置 FISH_HOME 时以空记忆启动。
-const home = process.env.FISH_HOME ?? join(root, 'data', 'naiwa');
 // 可选：把收到的原始 OneBot 事件逐行追加到这个文件（JSONL），用于收集真实格式样本。含聊天原文，只存本地。
 const recordFile = process.env.ONEBOT_RECORD_FILE ?? '';
 const ws = process.env.ONEBOT_WS ?? 'ws://127.0.0.1:3001';
@@ -34,7 +34,9 @@ if (!apiKey) {
 const persona = existsSync(personaPath) ? readFileSync(personaPath, 'utf8') : '你是一只小青蛙。';
 const socialRulesPath = process.env.FISH_SOCIAL_RULES ?? join(root, 'persona', 'social-rules.md');
 const socialRules = existsSync(socialRulesPath) ? readFileSync(socialRulesPath, 'utf8') : '';
-const fish = new Fish({ home, name: '奶蛙' }).start();
+// 连不上数据库或迁移失败会直接抛错退出，不会以空记忆启动。
+const db = await openStorage();
+const fish = await (await Fish.open({ db, name: '奶蛙' })).start();
 const brain = new DeepSeekBrain({ apiKey, model });
 
 let client = null;
@@ -78,5 +80,18 @@ async function connectLoop() {
   }
 }
 
-console.log(`[fish-bot] ${fish.character.name} 醒来 ｜ 模型=${model} ｜ 记忆库=${home}${recordFile ? ` ｜ 录制=${recordFile}` : ''}`);
+async function shutdown(signal) {
+  console.log(`[fish-bot] 收到 ${signal}，准备退出…`);
+  try {
+    await fish.stop();
+    await db.close();
+  } catch (error) {
+    console.error(`[fish-bot] 退出时出错：${error.message}`);
+  }
+  process.exit(0);
+}
+process.on('SIGINT', () => void shutdown('SIGINT'));
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+
+console.log(`[fish-bot] ${fish.character.name} 醒来 ｜ 模型=${model} ｜ 记忆库=PostgreSQL${recordFile ? ` ｜ 录制=${recordFile}` : ''}`);
 await connectLoop();

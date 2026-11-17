@@ -1,12 +1,12 @@
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import {
   Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook,
 } from '../src/index.js';
 import { createQQHandler } from '../src/qq-handler.js';
+import { openFish, testDb, closeTestDb } from './helpers.js';
+
+after(closeTestDb);
 
 function event(overrides = {}) {
   return {
@@ -158,10 +158,8 @@ test('@ 段保留显示名；模型信封用会话内代号区分发言者和被
 });
 
 // 多数入口测试关注身份与记录，不关心群聊闸门，因此默认沿用“群里每条都回复”的兼容模式；闸门有单独测试。
-function setup(t, { replyToAllGroupMessages = true } = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'fish-module1-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
-  const fish = new Fish({ home });
+async function setup(t, { replyToAllGroupMessages = true } = {}) {
+  const fish = await openFish();
   const requests = [], sent = [], errors = [];
   const brain = { chat: async (messages) => { requests.push(messages); return '收到'; } };
   // 模拟 OneBot 的发送结果：返回新消息的 message_id。
@@ -180,7 +178,7 @@ function setup(t, { replyToAllGroupMessages = true } = {}) {
 const userMessages = (request) => request.filter((m) => m.role === 'user').map((m) => JSON.parse(m.content));
 
 test('真实入口函数：同号私聊与群聊不共享历史，并路由到正确目标', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event({ message_type: 'private', user_id: 200, message: '私聊秘密' }));
   await h.handle(event({ message_id: 2, message: '群里你好' }));
   assert.equal(userMessages(h.requests[1]).length, 1);
@@ -191,22 +189,22 @@ test('真实入口函数：同号私聊与群聊不共享历史，并路由到�
 });
 
 test('真实入口函数：群聊保留每轮发言者，关系属于个人', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event());
   await h.handle(event({ user_id: 102, message_id: 2, sender: { nickname: '小乙' }, message: '我是小乙' }));
   const users = userMessages(h.requests[1]);
   assert.deepEqual(users.map((m) => m.sender.alias), ['u1', 'u2']);
   assert.deepEqual(users.map((m) => m.sender.name), ['甲的群名片', '小乙']);
   assert.ok(h.requests[1][0].content.includes('## 当前会话\n群聊'));
-  assert.deepEqual(h.fish.character.state().relationships.map((r) => r.peerId), ['qq:user:101', 'qq:user:102']);
-  assert.equal(h.fish.character.getRelationship('qq:user:101').name, '小甲');
-  const stored = h.fish.memory.export();
+  assert.deepEqual((await h.fish.character.state()).relationships.map((r) => r.peerId), ['qq:user:101', 'qq:user:102']);
+  assert.equal((await h.fish.character.getRelationship('qq:user:101')).name, '小甲');
+  const stored = await h.fish.memory.export();
   assert.equal(stored[1].meta.senderKey, 'qq:user:102');
   assert.equal(stored[1].meta.messageKey, 'qq:account:900:conversation:group:200:message:2');
 });
 
 test('真实入口函数：不同机器人账号、不同群的历史隔离', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event());
   await h.handle(event({ self_id: 901 }));
   await h.handle(event({ group_id: 201 }));
@@ -214,9 +212,9 @@ test('真实入口函数：不同机器人账号、不同群的历史隔离', as
 });
 
 test('真实入口函数：同一人先私聊后群聊，不以个人私有权限检索群上下文', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   const privateScope = conversationKey('qq', 900, 'private', 101);
-  h.fish.remember({ type: 'semantic', content: '私聊专属内容', access: scope.conversation(privateScope) });
+  await h.fish.remember({ type: 'semantic', content: '私聊专属内容', access: scope.conversation(privateScope) });
   await h.handle(event({ message_type: 'private', message: '私聊专属内容' }));
   await h.handle(event({ message_id: 2, message: '你好' }));
   assert.ok(h.requests[0][0].content.includes('私聊专属内容'));
@@ -224,7 +222,7 @@ test('真实入口函数：同一人先私聊后群聊，不以个人私有权�
 });
 
 test('真实入口函数：CQ 的 @/引用进入模型；损坏消息被跳过，后续仍能处理', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event({ self_id: undefined }));
   await h.handle(event({ message: '[CQ:reply,id=-5][CQ:at,qq=900]你好' }));
   const [user] = userMessages(h.requests[0]);
@@ -234,7 +232,7 @@ test('真实入口函数：CQ 的 @/引用进入模型；损坏消息被跳过�
 });
 
 test('归一化保留纯图片和纯@，入口维持本阶段只回复含文本消息的行为', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   const image = event({ message: [{ type: 'image', data: { file: 'x.jpg' } }] });
   assert.equal(normalizeOneBotMessage(image).segments.length, 1);
   await h.handle(image);
@@ -244,7 +242,7 @@ test('归一化保留纯图片和纯@，入口维持本阶段只回复含文本�
 });
 
 test('入口发送保留上游目标 ID 类型，数值和字符串输入使用同一会话', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event());
   await h.handle(event({ self_id: '900', group_id: '200', user_id: '101', message_id: '2' }));
   assert.equal(userMessages(h.requests[1]).length, 2);
@@ -252,7 +250,7 @@ test('入口发送保留上游目标 ID 类型，数值和字符串输入使用�
 });
 
 test('真实入口函数：情节记忆只在原会话召回，不跨群或私聊', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event({ message: '暗号是蓝色海豚' }));
   await h.handle(event({ message_id: 2, message: '蓝色海豚' }));
   await h.handle(event({ group_id: 201, message_id: 3, message: '蓝色海豚' }));
@@ -264,17 +262,17 @@ test('真实入口函数：情节记忆只在原会话召回，不跨群或私�
 });
 
 test('入口模型失败记录内部错误，聊天对象只收到通用提示', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   h.brain.chat = async () => { throw new Error('internal-provider-details'); };
   await h.handle(event());
   assert.equal(h.errors[0].error.message, 'internal-provider-details');
   assert.equal(h.sent.length, 1);
   assert.ok(!JSON.stringify(h.sent).includes('internal-provider-details'));
-  assert.equal(h.fish.memory.count(), 0);
+  assert.equal(await h.fish.memory.count(), 0);
 });
 
 test('相同聊天内容在不同群、私聊和机器人账号下分别保存，同一范围仍去重', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   const inputs = [
     event({ message_id: 10 }),
     event({ group_id: 201, message_id: 11 }),
@@ -282,24 +280,24 @@ test('相同聊天内容在不同群、私聊和机器人账号下分别保存�
     event({ self_id: 901, message_id: 13 }),
   ].map((input) => ({ ...input, sender: { nickname: '小甲' }, message: '我喜欢鲸鱼' }));
   for (const input of inputs) await h.handle(input);
-  assert.equal(h.fish.memory.count(), 4);
-  assert.equal(new Set(h.fish.memory.export().map((r) => r.content)).size, 1);
+  assert.equal(await h.fish.memory.count(), 4);
+  assert.equal(new Set((await h.fish.memory.export()).map((r) => r.content)).size, 1);
 
   // 同一可见范围内的相同内容仍应去重，不通过完全关闭去重掩盖问题。
   await h.handle({ ...inputs[0], message_id: 14 });
-  assert.equal(h.fish.memory.count(), 4);
+  assert.equal(await h.fish.memory.count(), 4);
 
-  const reloaded = new Fish({ home: h.fish.home });
+  const reloaded = await Fish.open({ db: await testDb(), tenantId: h.fish.tenantId });
   for (const input of inputs) {
     const conversation = normalizeOneBotMessage(input).conversation.key;
-    const records = reloaded.recall({ requester: conversation, query: '鲸鱼' });
+    const records = await reloaded.recall({ requester: conversation, query: '鲸鱼' });
     assert.equal(records.length, 1);
     assert.equal(records[0].meta.conversationKey, conversation);
   }
 });
 
 test('@ 当前机器人账号标为 toYou，随账号变化；@ 另一个机器人账号只是普通成员', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   for (const account of [900, 901]) {
     await h.handle(event({ self_id: account, message: `[CQ:at,qq=${account}][CQ:at,qq=${1801 - account}]你好` }));
     const [self, other] = userMessages(h.requests.at(-1)).at(-1).segments;
@@ -310,7 +308,7 @@ test('@ 当前机器人账号标为 toYou，随账号变化；@ 另一个机器�
 });
 
 test('模型请求中不出现原始 QQ 号或内部 key；代号在会话内稳定、因人而异', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   const ids = { self_id: 77703, group_id: 66602 };
   await h.handle(event({ ...ids, user_id: 55501, message_id: 1, sender: { nickname: '甲' }, message: '鲸鱼好大' }));
   await h.handle(event({ ...ids, user_id: 55502, message_id: 2, sender: { nickname: '乙' },
@@ -329,14 +327,14 @@ test('模型请求中不出现原始 QQ 号或内部 key；代号在会话内稳
   ]);
   // 记忆按会话内代号标注发言者；内部仍保存真实 key 供程序使用。
   assert.match(h.requests[2][0].content, /- \[episodic · u1\] 甲说「鲸鱼好大」/);
-  assert.equal(h.fish.memory.export()[0].meta.senderKey, 'qq:user:55501');
+  assert.equal((await h.fish.memory.export())[0].meta.senderKey, 'qq:user:55501');
   assert.deepEqual(userMessages(h.requests[3]).map((m) => m.sender.alias), ['u1']);
 });
 
 test('会话记忆使用 conversation 范围：只对该会话可见，不对个人或其他会话可见', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   await h.handle(event());
-  const [record] = h.fish.memory.export();
+  const [record] = await h.fish.memory.export();
   const conversation = 'qq:account:900:conversation:group:200';
   assert.equal(record.access, `conversation:${conversation}`);
   assert.equal(scope.conversation(conversation), record.access);
@@ -347,10 +345,10 @@ test('会话记忆使用 conversation 范围：只对该会话可见，不对个
 });
 
 test('自我记忆只注入 self 范围的记录，不借 self 身份读到其他会话的私有记录', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   const dm = conversationKey('qq', 900, 'private', 101);
-  h.fish.remember({ type: 'self', content: '只属于私聊的自我记录', access: scope.conversation(dm) });
-  h.fish.remember({ type: 'self', content: '奶蛙今天学会了游泳', access: scope.SELF });
+  await h.fish.remember({ type: 'self', content: '只属于私聊的自我记录', access: scope.conversation(dm) });
+  await h.fish.remember({ type: 'self', content: '奶蛙今天学会了游泳', access: scope.SELF });
   await h.handle(event({ group_id: 555 }));
   const prompt = h.requests[0][0].content;
   assert.ok(!prompt.includes('只属于私聊的自我记录'));
@@ -358,15 +356,15 @@ test('自我记忆只注入 self 范围的记录，不借 self 身份读到其�
 });
 
 test('回复已发出后保存失败：用户收到真实回复，错误只记日志', async (t) => {
-  const h = setup(t);
-  h.fish.remember = () => { throw new Error('ENOSPC'); };
+  const h = await setup(t);
+  h.fish.remember = async () => { throw new Error('ENOSPC'); };
   await h.handle(event());
   assert.deepEqual(h.sent.map((s) => s.message[0].data.text), ['收到']);
   assert.deepEqual(h.errors.map((e) => e.error.message), ['ENOSPC']);
 });
 
 test('发送失败不记录：历史、记忆和关系都不把未送达的回复当成已发生', async (t) => {
-  const h = setup(t);
+  const h = await setup(t);
   const client = { sendGroupMsg: async () => { throw new Error('未连接'); } };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色',
@@ -374,8 +372,8 @@ test('发送失败不记录：历史、记忆和关系都不把未送达的回�
   });
   await handle(event({ message: '第一句' }));
   assert.deepEqual(h.errors.map((e) => e.error.message), ['未连接']);
-  assert.equal(h.fish.memory.count(), 0);
-  assert.equal(h.fish.character.state().relationships.length, 0);
+  assert.equal(await h.fish.memory.count(), 0);
+  assert.equal((await h.fish.character.state()).relationships.length, 0);
 
   await h.handle(event({ message_id: 2, message: '第二句' }));
   const history = h.requests[1].filter((m) => m.role !== 'system');
@@ -384,19 +382,19 @@ test('发送失败不记录：历史、记忆和关系都不把未送达的回�
 });
 
 test('群聊闸门：没叫到奶蛙的群消息不调模型、不回复、不记录；私聊照常回复', async (t) => {
-  const h = setup(t, { replyToAllGroupMessages: false });
+  const h = await setup(t, { replyToAllGroupMessages: false });
   await h.handle(event({ message: '大家晚上好' }));
   await h.handle(event({ message_id: 2, message: '[CQ:at,qq=all]开会了' }));
   await h.handle(event({ message_id: 3, message: '[CQ:at,qq=102]你看这个' }));
   assert.equal(h.requests.length, 0);
   assert.equal(h.sent.length, 0);
-  assert.equal(h.fish.memory.count(), 0);
+  assert.equal(await h.fish.memory.count(), 0);
   await h.handle(event({ message_type: 'private', sub_type: 'friend', message_id: 4, message: '在吗' }));
   assert.deepEqual(h.sent.map((s) => s.kind), ['private']);
 });
 
 test('群聊闸门：被 @ 时回复；引用奶蛙自己发出的消息时回复，引用别人的消息不回复', async (t) => {
-  const h = setup(t, { replyToAllGroupMessages: false });
+  const h = await setup(t, { replyToAllGroupMessages: false });
   await h.handle(event({ message: '[CQ:at,qq=900]奶蛙你好' }));
   assert.equal(h.sent.length, 1); // 奶蛙这条回复的 message_id 是 9001
   await h.handle(event({ message_id: 2, message: '[CQ:reply,id=9001]哈哈真的吗' }));

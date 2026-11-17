@@ -67,9 +67,9 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     const aliasOf = aliasesFor(conversation.key);
     // 按会话读取，不能因当前发言者相同就把其私聊记忆带到群里。
     // 情节记忆按会话写入、按会话召回；跨会话共享、遗忘与长期权限仍属于 module 6。
-    const visible = fish.recall({ query: text.trim(), requester: conversation.key, limit: 3 });
+    const visible = await fish.recall({ query: text.trim(), requester: conversation.key, limit: 3 });
     // 'self' 请求者能看到全部记录，所以必须再按 access 过滤：只取角色自身范围的自我记忆。
-    const selfMem = fish.memory.retrieve({ requester: 'self', types: ['self'], limit: Infinity })
+    const selfMem = (await fish.memory.retrieve({ requester: 'self', types: ['self'], limit: Infinity }))
       .filter((m) => m.access === scope.SELF).slice(0, 2);
     const all = [...visible, ...selfMem].slice(0, 5);
     // 记忆里的发言者用本会话代号标注；其他会话的 key 不在本会话编号。
@@ -104,10 +104,10 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   }
 
   // 只在回复确实发出后调用：历史、情节记忆、关系都只记录已经发生的事。
-  function record(message, { reply, history, userMessage }) {
+  async function record(message, { reply, history, userMessage }) {
     const { text, conversation, sender } = message;
     histories.set(conversation.key, [...history, userMessage, { role: 'assistant', content: reply }].slice(-historyTurns));
-    fish.remember({
+    await fish.remember({
       type: 'episodic',
       // 正文不写身份 key（会进入模型提示）；身份放在 meta，召回时再换成会话内代号。
       content: `${sender.displayName ?? '对方'}说「${text.trim().slice(0, 60)}」→ 我「${reply.slice(0, 60)}」`,
@@ -118,7 +118,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       meta: { messageKey: message.key, conversationKey: conversation.key, accountKey: message.account.key, senderKey: sender.key },
     });
     // 群名片只用于这条消息显示，不覆盖该用户的全局关系昵称。
-    fish.touch(sender.key, { name: sender.nickname, deltaSentiment: 0.05 });
+    await fish.touch(sender.key, { name: sender.nickname, deltaSentiment: 0.05 });
   }
 
   return async function handleEvent(event) {
@@ -150,7 +150,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     // 降级提示不是角色的真实回复，不进入历史与记忆。
     if (!turn) return;
     try {
-      record(message, turn);
+      await record(message, turn);
     } catch (error) {
       // 回复已经发出，保存失败只记日志，不能再用降级提示顶替已发出的回复。
       onError('保存记录失败', error);

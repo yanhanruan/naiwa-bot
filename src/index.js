@@ -12,3 +12,5 @@ export * from './schema.js';
 export * from './identity.js';
 export { normalizeOneBotMessage } from './adapters/onebot-message.js';
 export { messageForModel, createAliasBook } from './message.js';
+export { openStorage, openTestStorage, migrate } from './storage/index.js';
+export { moodLabel } from './character.js';

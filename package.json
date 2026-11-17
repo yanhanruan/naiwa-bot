@@ -1,20 +1,27 @@
 {
-  "name": "fish-os",
+  "name": "naiwa-bot",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Fish OS — 跨平台数字生命核心：人格引擎 + 长期记忆 + 事件存储 + 审批策略 + 主动行为调度 + Character OS Bridge（零外部依赖）",
+  "description": "奶蛙：有个性的 QQ 客服机器人。人格引擎 + 长期记忆 + 事件存储（PostgreSQL）+ 审批策略 + 主动行为调度",
   "license": "MIT",
   "bin": {
     "fish": "./bin/fish.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "fish": "node ./bin/fish.mjs",
-    "daemon": "node ./bin/fish-daemon.mjs"
+    "fish": "node --env-file=.env ./bin/fish.mjs",
+    "daemon": "node --env-file=.env ./bin/fish-daemon.mjs",
+    "db:import": "node --env-file=.env scripts/import-json.mjs",
+    "db:migrate": "node --env-file=.env -e \"import('./src/storage/index.js').then(async (s) => { const db = await s.openStorage({ migrateOnOpen: false }); console.log(await s.migrate(db)); await db.close(); })\""
   },
   "engines": {
     "node": ">=20.3.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.13"
+  }
 }

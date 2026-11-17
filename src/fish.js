@@ -1,5 +1,3 @@
-import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
 import { EventStore } from './eventstore.js';
 import { MemoryService } from './memory.js';
 import { CharacterCore } from './character.js';
@@ -10,14 +8,22 @@ import { scope } from './schema.js';
 
 // 数字生命顶层编排：把人格、记忆、事件、策略、调度、Bridge 组装成一条「鱼」。
 // 平台适配器通过 reactTo / remember / recall / touch / act 与鱼交互。
+// 所有持久化都通过 db（见 src/storage），因此涉及存储的方法都是异步的。
 export class Fish {
-  constructor({ home, name = '奶蛙', persona = {}, policy = {} } = {}) {
-    if (!home) throw new Error('Fish requires a home directory');
-    this.home = home;
-    mkdirSync(home, { recursive: true });
-    this.events = new EventStore(join(home, 'events.json'));
-    this.memory = new MemoryService(join(home, 'memory.json'));
-    this.character = new CharacterCore({ name, persona, file: join(home, 'character.json') });
+  // 用 Fish.open 创建：它会在数据库里准备好角色状态。
+  static async open({ db, tenantId = 'default', name = '奶蛙', persona = {}, policy = {} } = {}) {
+    const fish = new Fish({ db, tenantId, name, persona, policy });
+    await fish.character.init();
+    return fish;
+  }
+
+  constructor({ db, tenantId = 'default', name = '奶蛙', persona = {}, policy = {} } = {}) {
+    if (!db) throw new Error('Fish requires a db（见 src/storage 的 openStorage）');
+    this.db = db;
+    this.tenantId = tenantId;
+    this.events = new EventStore(db, { tenantId });
+    this.memory = new MemoryService(db, { tenantId });
+    this.character = new CharacterCore({ db, tenantId, name, persona });
     this.policy = new Policy(policy);
     this.scheduler = new Scheduler({ policy: this.policy });
     this.bridge = new Bridge(this);
@@ -25,38 +31,38 @@ export class Fish {
     this._started = false;
   }
 
-  start() {
-    this.events.append({ kind: 'system.started', payload: { name: this.character.name } });
+  async start() {
+    await this.events.append({ kind: 'system.started', payload: { name: this.character.name } });
     this._started = true;
     return this;
   }
 
-  stop() {
-    this.events.append({ kind: 'system.stopped', payload: {} });
+  async stop() {
+    await this.events.append({ kind: 'system.stopped', payload: {} });
     this._started = false;
     return this;
   }
 
-  connect(platform) {
+  async connect(platform) {
     if (!this.connectedPlatforms.includes(platform)) {
       this.connectedPlatforms.push(platform);
-      this.events.append({ kind: 'platform.connected', platform, payload: {} });
+      await this.events.append({ kind: 'platform.connected', platform, payload: {} });
     }
     return this;
   }
 
-  disconnect(platform) {
+  async disconnect(platform) {
     this.connectedPlatforms = this.connectedPlatforms.filter((p) => p !== platform);
-    this.events.append({ kind: 'platform.disconnected', platform, payload: {} });
+    await this.events.append({ kind: 'platform.disconnected', platform, payload: {} });
     return this;
   }
 
   // —— 高级 API（平台适配器 / 工具调用统一入口）——
 
-  remember({ type, content, tags, peers, importance, access, summary, meta }) {
-    const res = this.memory.add({ type, content, tags, peers, importance, access, summary, meta });
+  async remember({ type, content, tags, peers, importance, access, summary, meta }) {
+    const res = await this.memory.add({ type, content, tags, peers, importance, access, summary, meta });
     if (res.added) {
-      this.events.append({
+      await this.events.append({
         kind: 'memory.added',
         platform: 'fish-os',
         payload: { id: res.record.id, type: res.record.type, access: res.record.access },
@@ -66,9 +72,9 @@ export class Fish {
     return res;
   }
 
-  recall({ query, requester = 'self', types, limit }) {
-    const recs = this.memory.retrieve({ query, requester, types, limit });
-    this.events.append({
+  async recall({ query, requester = 'self', types, limit }) {
+    const recs = await this.memory.retrieve({ query, requester, types, limit });
+    await this.events.append({
       kind: 'memory.retrieved',
       platform: 'fish-os',
       payload: { query, requester, count: recs.length },
@@ -78,18 +84,18 @@ export class Fish {
   }
 
   // 平台适配器把入站消息转成统一事件交给这里。
-  reactTo(event) {
-    const ev = this.events.append(event);
-    this.character.perceive(ev);
+  async reactTo(event) {
+    const ev = await this.events.append(event);
+    await this.character.perceive(ev);
     return ev;
   }
 
   // 只读内容摄取：把平台适配器拉到的内容转成统一事件（不产生任何写操作）。
-  ingestContent(items) {
+  async ingestContent(items) {
     const events = [];
     for (const item of items) {
       events.push(
-        this.events.append({
+        await this.events.append({
           platform: item.platform,
           kind: 'content.read',
           actor: this.character.name,
@@ -107,9 +113,9 @@ export class Fish {
     return this.remember({ type: 'self', content, tags, importance, access: 'self' });
   }
 
-  touch(peerId, opts) {
-    const rel = this.character.touchRelationship(peerId, opts);
-    this.events.append({
+  async touch(peerId, opts) {
+    const rel = await this.character.touchRelationship(peerId, opts);
+    await this.events.append({
       kind: 'relationship.touched',
       platform: 'fish-os',
       target: peerId,
@@ -124,8 +130,8 @@ export class Fish {
     return this.scheduler.register(task);
   }
 
-  proactiveTick() {
-    this.events.append({ kind: 'proactive.tick', platform: 'fish-os', payload: { enabled: this.policy.proactiveEnabled } });
+  async proactiveTick() {
+    await this.events.append({ kind: 'proactive.tick', platform: 'fish-os', payload: { enabled: this.policy.proactiveEnabled } });
     return this.scheduler.tick();
   }
 }

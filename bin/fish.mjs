@@ -1,7 +1,6 @@
 #!/usr/bin/env node
-import { homedir } from 'node:os';
-import { join } from 'node:path';
 import { Fish } from '../src/index.js';
+import { openStorage } from '../src/storage/index.js';
 
 async function readStdin() {
   const chunks = [];
@@ -10,17 +9,25 @@ async function readStdin() {
 }
 
 async function main() {
-  const home = process.env.FISH_HOME ?? join(homedir(), '.fish-os');
   const [cmd, ...args] = process.argv.slice(2);
-  const fish = new Fish({ home });
+  if (!cmd || cmd === 'help') return run(null, 'help', args); // 看帮助不需要连数据库
+  const db = await openStorage();
+  try {
+    await run(await Fish.open({ db }), cmd, args);
+  } finally {
+    await db.close();
+  }
+}
+
+async function run(fish, cmd, args) {
   const out = (o) => console.log(JSON.stringify(o, null, 2));
 
   switch (cmd) {
     case 'status':
-      out(fish.bridge.getStatus());
+      out(await fish.bridge.getStatus());
       break;
     case 'state':
-      out(fish.bridge.getCharacterState());
+      out(await fish.bridge.getCharacterState());
       break;
     case 'remember': {
       const type = args[0] ?? 'episodic';
@@ -31,29 +38,29 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      out(fish.remember({ type, content }));
+      out(await fish.remember({ type, content }));
       break;
     }
     case 'recall':
-      out(fish.recall({ query: args.join(' ') || '', requester: 'self' }));
+      out(await fish.recall({ query: args.join(' ') || '', requester: 'self' }));
       break;
     case 'export':
-      out(fish.memory.export({ requester: 'self' }));
+      out(await fish.memory.export({ requester: 'self' }));
       break;
     case 'forget':
-      out(fish.memory.forget(args[0]));
+      out(await fish.memory.forget(args[0]));
       break;
     case 'delete':
-      out(fish.memory.deleteAll('self'));
+      out(await fish.memory.deleteAll('self'));
       break;
     case 'act':
-      out(fish.bridge.act({ type: args[0] ?? 'publish', platform: 'fish-os', text: args.slice(1).join(' ') }));
+      out(await fish.bridge.act({ type: args[0] ?? 'publish', platform: 'fish-os', text: args.slice(1).join(' ') }));
       break;
     case 'approve':
-      out(fish.bridge.approve(args[0]));
+      out(await fish.bridge.approve(args[0]));
       break;
     case 'deny':
-      out(fish.bridge.deny(args[0]));
+      out(await fish.bridge.deny(args[0]));
       break;
     case 'proactive-on':
       out({ proactiveEnabled: fish.policy.setProactiveEnabled(true) });
@@ -82,7 +89,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      const evs = fish.ingestContent(items);
+      const evs = await fish.ingestContent(items);
       console.log(`已摄取 ${items.length} 条 B站内容（event ${evs.length} 条）：`);
       for (const it of items) console.log(`- ${it.title} ｜ UP: ${it.author} ｜ 播放 ${it.stats.view}`);
       break;

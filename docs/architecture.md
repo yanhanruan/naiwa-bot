@@ -71,14 +71,19 @@ flowchart TD
 2. SnowLuma Hook 捕获 → 转成 OneBot v11 事件 → WS `:3001` 推给 fish-bot；
 3. fish-bot 检索该 peer 可见的记忆 + 拼 system prompt（人设/准则/记忆/时间/历史）；
 4. 调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成）；
-5. 拿到回复 → 写入 `data/naiwa`（情节记忆 + 关系）→ 通过 OneBot `send_private_msg` / `send_group_msg` 发回；
+5. 拿到回复 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
 6. 失败降级：搜索 500/超时 → 重试 → 退回不搜再答，不把错误抛给用户。
 
 ## 存储
 
-```
-data/naiwa/
-├── memory.json      # 长期记忆（情节/自我；隐私隔离）
-├── character.json   # 情绪 / 关系 / 兴趣
-└── events.json      # 统一事件（审计/回溯）
-```
+PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结构见 `migrations/`：
+
+| 表 | 内容 |
+| --- | --- |
+| `memories` | 长期记忆（情节/语义/自我…；按 access 隔离，唯一索引去重） |
+| `events` | 统一事件（审计/回溯，只追加） |
+| `character_state` | 情绪、创建时间 |
+| `interests` | 兴趣及权重 |
+| `relationships` | 每个人的关系：互动次数、好感度、备注 |
+
+所有表带 `tenant_id`（目前只有 `default`）。详见 [Module 2 导读](module-02-storage.md)。

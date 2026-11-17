@@ -5,27 +5,28 @@
 ## Docker 运行
 
 ```bash
-cd fish-os
-docker compose up -d --build       # 后台长驻
-docker compose logs -f fish        # 看日志（心跳/主动任务）
-docker compose exec fish node bin/fish.mjs status   # 查结构化状态
+cd naiwa-bot
+docker compose up -d db                      # PostgreSQL（只监听 127.0.0.1）
+docker compose --profile daemon up -d --build fish   # 可选：主动行为守护进程
+docker compose logs -f fish
 ```
 
-- 数据卷 `fish-data` 挂载到容器内 `/data`（即 `FISH_HOME`），容器重建不丢记忆。
-- 主动行为默认关闭（最小权限）；需要时 `docker compose exec fish node bin/fish.mjs proactive-on`。
+- 数据在命名卷 `naiwa-pg`（PostgreSQL 数据目录），容器重建不丢数据。
+- 主动行为默认关闭（最小权限）。完整的容器化部署属于 Module 10。
 
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `FISH_HOME` | `~/.fish-os` | 数据目录（记忆/角色状态/事件） |
+| `DATABASE_URL` | 无（必填） | PostgreSQL 连接串 |
+| `POSTGRES_PASSWORD` | 无（必填） | compose 初始化数据库用的密码 |
 | `FISH_TICK_MS` | `60000` | 主动调度 tick 间隔（毫秒） |
 
 ## 备份与恢复
 
 ```bash
-FISH_HOME=/path/to/data scripts/backup.sh ./backup.tar.gz
-FISH_HOME=/path/to/data scripts/restore.sh ./backup.tar.gz
+scripts/backup.sh                       # -> backups/naiwa-pg-<时间>.dump（已被 git 忽略）
+scripts/restore.sh backups/xxx.dump --yes   # 先停止机器人再恢复
 ```
 
 ## 日志与监控

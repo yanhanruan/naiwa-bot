@@ -1,12 +1,36 @@
 services:
+  # PostgreSQL：奶蛙的全部持久数据（记忆、事件、角色状态、关系）。
+  # 只监听本机 127.0.0.1，不对局域网开放。密码来自同目录 .env 的 POSTGRES_PASSWORD。
+  db:
+    # 默认用 Docker Hub 官方镜像；拉不到时可在 .env 里用 POSTGRES_IMAGE 指向其他镜像源的同一镜像（必须是 PostgreSQL 18）
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine}
+    environment:
+      POSTGRES_USER: naiwa
+      POSTGRES_DB: naiwa
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 里设置 POSTGRES_PASSWORD}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18 官方镜像的数据目录挂载点是 /var/lib/postgresql
+      - naiwa-pg:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U naiwa -d naiwa"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # 主动行为守护进程（可选）。QQ 机器人目前在宿主机上运行，容器化留给 Module 10。
   fish:
     build: .
+    profiles: ["daemon"]
     environment:
-      FISH_HOME: /data
+      DATABASE_URL: postgres://naiwa:${POSTGRES_PASSWORD}@db:5432/naiwa
       FISH_TICK_MS: "60000"
-    volumes:
-      - fish-data:/data
+    depends_on:
+      db:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  fish-data:
+  naiwa-pg:
