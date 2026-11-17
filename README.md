@@ -6,7 +6,7 @@
 
 > 纯 ESM，Node ≥ 22.4（用到内置的 WebSocket）。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite）和本地假 OneBot 服务端，`npm test` 不需要启动任何服务。
 
-> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
+> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
 
 ## 架构
 
@@ -50,6 +50,12 @@ naiwa-bot/
 │   ├── fish.js             # 顶层编排
 │   ├── qq-handler.js       # QQ 消息处理（召回记忆、调模型、发送、记录）
 │   ├── log.js              # 结构化日志
+│   ├── model/
+│   │   ├── brain.js          # DeepSeek 调用（时限、重试、检查结果、入账、执行上限）
+│   │   ├── errors.js         # 模型调用的错误分类
+│   │   ├── pricing.js        # 官方价格表与花费估算
+│   │   ├── usage-ledger.js   # 每日用量账本（PostgreSQL）
+│   │   └── rate-limiter.js   # 按会话限速
 │   ├── adapters/
 │   │   ├── onebot.js         # OneBot v11 客户端（重连、超时、假活探测）
 │   │   ├── send-throttle.js  # 发送节流
@@ -160,10 +166,13 @@ npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 
 OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`）扮演 SnowLuma，覆盖断线重连、超时、假活、坏数据和发送节流，见 [Module 3 导读](docs/module-03-onebot.md)。
 
+模型调用的测试用一个本地 HTTP 服务扮演 DeepSeek，覆盖空回复、截断、内容过滤、限流、超时、各类错误，以及每日花费上限和按会话限速，见 [Module 4 导读](docs/module-04-model.md)。
+
 ## 诚实的状态标注
 
 - ✅ 已实现并测试：人格引擎、长期记忆（含隐私隔离/导出/删除）、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
 - ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。
+- ✅ 模型调用：DeepSeek Responses API，一次回复 60 秒内必有结果、最多两次尝试、错误分类、按官方价格估算花费、每日花费上限、按会话限速（Module 4）。
 - ✅ B站只读内容获取（Phase 2 之一）：热门 + 搜索真实拉取，转成统一 `content.read` 事件。
 - ✅ 存储：PostgreSQL + 编号迁移 + pg_dump 备份/恢复 + 旧 JSON 导入（Module 2）。
 - ⬜ 尚未接通：小红书/抖音只读（需账号/签名授权）、把 fish-os 记忆作为 DSH 工具注入 QQ 会话、LLM 摘要器/向量检索（当前规则检索 + 截断摘要，接口已预留）。

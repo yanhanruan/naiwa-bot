@@ -2,8 +2,9 @@ import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook, OneBotError,
+  ModelError,
 } from '../src/index.js';
-import { createQQHandler } from '../src/qq-handler.js';
+import { createQQHandler, NOTICES } from '../src/qq-handler.js';
 import { openFish, testDb, closeTestDb, captureLogger } from './helpers.js';
 
 after(closeTestDb);
@@ -273,6 +274,53 @@ test('入口模型失败记录内部错误，聊天对象只收到通用提示',
   assert.equal(h.sent.length, 1);
   assert.ok(!JSON.stringify(h.sent).includes('internal-provider-details'));
   assert.equal(await h.fish.memory.count(), 0);
+});
+
+const sentTexts = (h) => h.sent.map((s) => s.message[0].data.text);
+
+test('花费上限：每次被叫到都回固定提示；会话限速：每段受限时间只提示一次；都不记录，也不算错误', async (t) => {
+  const h = await setup(t);
+  h.brain.chat = async () => { throw new ModelError('BUDGET_EXCEEDED'); };
+  await h.handle(event({ message_id: 1 }));
+  await h.handle(event({ message_id: 2 }));
+  h.brain.chat = async () => { throw new ModelError('CONVERSATION_RATE_LIMITED', { notify: true, retryAfterMs: 1000 }); };
+  await h.handle(event({ message_id: 3 }));
+  h.brain.chat = async () => { throw new ModelError('CONVERSATION_RATE_LIMITED', { notify: false, retryAfterMs: 500 }); };
+  await h.handle(event({ message_id: 4 }));
+
+  assert.deepEqual(sentTexts(h), [NOTICES.budget, NOTICES.budget, NOTICES.rateLimited]);
+  assert.equal(NOTICES.budget, '今天的蛙力用完了，明天再聊');
+  assert.deepEqual(h.logs.find('message.done').map((e) => [e.outcome, e.errorCode]), [
+    ['budget_exceeded', 'BUDGET_EXCEEDED'], ['budget_exceeded', 'BUDGET_EXCEEDED'],
+    ['rate_limited', 'CONVERSATION_RATE_LIMITED'], ['rate_limited_silent', 'CONVERSATION_RATE_LIMITED'],
+  ]);
+  assert.deepEqual(h.errors, []);
+  assert.equal(h.logs.find('reply.limited').length, 4);
+  assert.equal(await h.fish.memory.count(), 0);
+});
+
+test('模型按内容安全策略拒答时回婉拒提示；空回复按失败处理，不用“？”占位', async (t) => {
+  const h = await setup(t);
+  h.brain.chat = async () => { throw new ModelError('FILTERED'); };
+  await h.handle(event({ message_id: 1 }));
+  h.brain.chat = async () => '   ';
+  await h.handle(event({ message_id: 2 }));
+  assert.deepEqual(sentTexts(h), [NOTICES.filtered, NOTICES.fallback]);
+  assert.deepEqual(h.logs.find('message.done').map((e) => [e.outcome, e.errorCode]), [['filtered', 'FILTERED'], ['fallback', 'EMPTY']]);
+  assert.equal(h.logs.find('reply.filtered')[0].level, 'warn');
+  assert.equal(h.logs.find('reply.failed')[0].error.code, 'EMPTY');
+  assert.equal(await h.fish.memory.count(), 0);
+});
+
+test('调用模型时带上消息 key 和会话 key（日志关联、按会话限速、用量统计都靠它们）', async (t) => {
+  const h = await setup(t);
+  let opts;
+  h.brain.chat = async (_messages, o) => { opts = o; return '好'; };
+  await h.handle(event());
+  assert.deepEqual(opts, {
+    key: 'qq:account:900:conversation:group:200:message:1',
+    conversationKey: 'qq:account:900:conversation:group:200',
+  });
 });
 
 test('相同聊天内容在不同群、私聊和机器人账号下分别保存，同一范围仍去重', async (t) => {

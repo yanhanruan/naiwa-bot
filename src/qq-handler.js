@@ -4,8 +4,32 @@ import { normalizeOneBotMessage } from './adapters/onebot-message.js';
 import { seg } from './adapters/onebot.js';
 import { messageForModel, createAliasBook } from './message.js';
 import { createLogger } from './log.js';
+import { ModelError } from './model/errors.js';
 
-const FALLBACK_REPLY = '（咕噜…我卡了一下，稍后再试）';
+// 模型给不出回复时发给聊天对象的固定提示，不含任何内部错误信息。
+export const NOTICES = {
+  fallback: '（咕噜…我卡了一下，稍后再试）', // 模型出错、超时、空回复等
+  budget: '今天的蛙力用完了，明天再聊', // 今天的模型花费已达上限：每次被叫到都回这句
+  rateLimited: '（咕噜…说得太快啦，我歇一会儿再聊）', // 这个会话调用太频繁：每段受限时间只提示一次
+  filtered: '（这个话题我不太方便聊～）', // 模型按内容安全策略拒绝回答
+};
+
+// 预期之内的限制（花费上限、会话限速）只记 info，不算错误。
+const LIMIT_CODES = new Set(['BUDGET_EXCEEDED', 'CONVERSATION_RATE_LIMITED']);
+
+// 根据模型错误决定发什么、日志里的结果叫什么。notice 为 null 表示这条不回复。
+function noticeFor(error) {
+  switch (error?.code) {
+    case 'BUDGET_EXCEEDED':
+      return { notice: NOTICES.budget, outcome: 'budget_exceeded' };
+    case 'CONVERSATION_RATE_LIMITED':
+      return error.notify ? { notice: NOTICES.rateLimited, outcome: 'rate_limited' } : { notice: null, outcome: 'rate_limited_silent' };
+    case 'FILTERED':
+      return { notice: NOTICES.filtered, outcome: 'filtered' };
+    default:
+      return { notice: NOTICES.fallback, outcome: 'fallback' };
+  }
+}
 
 const MESSAGE_FORMAT = [
   '## 消息格式',
@@ -91,9 +115,13 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     ].filter(Boolean).join('\n\n');
     const history = histories.get(conversation.key) ?? [];
     const userMessage = { role: 'user', content: messageForModel(message, aliasOf) };
-    const reply = (await brain.chat([
-      { role: 'system', content: systemContent }, ...history, userMessage,
-    ])).trim() || '？';
+    // 消息 key 用于日志关联；会话 key 用于按会话限速和用量统计。
+    const reply = String(await brain.chat(
+      [{ role: 'system', content: systemContent }, ...history, userMessage],
+      { key: message.key, conversationKey: conversation.key },
+    ) ?? '').trim();
+    // 空回复不用“？”之类的占位顶替，按模型失败处理。
+    if (!reply) throw new ModelError('EMPTY');
     return { reply, history, userMessage };
   }
 
@@ -150,28 +178,38 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     log.info('message.accepted', { conversation: message.conversation.kind, textChars: message.text.length });
 
     let turn = null;
+    let notice = null;
+    let outcome = 'replied';
+    let errorCode;
     const replyStartedAt = Date.now();
     try {
       turn = await generateReply(message);
     } catch (error) {
-      log.error('reply.failed', { msg: '生成回复失败，改发通用提示', error });
+      ({ notice, outcome } = noticeFor(error));
+      errorCode = error?.code;
+      if (LIMIT_CODES.has(errorCode)) log.info('reply.limited', { msg: '触发模型调用限制，不调用模型', code: errorCode });
+      else if (errorCode === 'FILTERED') log.warn('reply.filtered', { msg: '模型按内容安全策略拒绝回答，改发婉拒提示', error });
+      else log.error('reply.failed', { msg: '生成回复失败，改发通用提示', error });
     }
     const replyMs = Date.now() - replyStartedAt;
-    const outcome = turn ? 'replied' : 'fallback';
+    if (!turn && !notice) {
+      log.info('message.done', { outcome, errorCode, replyMs, totalMs: Date.now() - startedAt });
+      return;
+    }
 
     const sendStartedAt = Date.now();
     let sent;
     try {
-      sent = await send(message, turn?.reply ?? FALLBACK_REPLY);
+      sent = await send(message, turn?.reply ?? notice);
     } catch (error) {
       // 未送达（或不确定是否送达）就不记录；delivery 说明是否可能已发出，重试策略留待 module 5。
       log.error('send.failed', { msg: '发送失败，本条不记录', error, delivery: error?.delivery ?? 'unknown' });
-      log.warn('message.done', { outcome: 'send_failed', replyMs, sendMs: Date.now() - sendStartedAt, totalMs: Date.now() - startedAt });
+      log.warn('message.done', { outcome: 'send_failed', errorCode, replyMs, sendMs: Date.now() - sendStartedAt, totalMs: Date.now() - startedAt });
       return;
     }
     const sendMs = Date.now() - sendStartedAt;
 
-    // 降级提示不是角色的真实回复，不进入历史与记忆。
+    // 固定提示不是角色的真实回复，不进入历史与记忆。
     let recorded = false;
     if (turn) {
       try {
@@ -183,7 +221,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       }
     }
     log.info('message.done', {
-      outcome, recorded, sentMessageId: sent?.message_id, replyChars: turn?.reply.length, replyMs, sendMs, totalMs: Date.now() - startedAt,
+      outcome, errorCode, recorded, sentMessageId: sent?.message_id, replyChars: turn?.reply.length, replyMs, sendMs, totalMs: Date.now() - startedAt,
     });
   };
 }

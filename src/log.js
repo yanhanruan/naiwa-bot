@@ -8,7 +8,7 @@
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const LEVEL_TEXT = { debug: '调试', info: '信息', warn: '警告', error: '错误' };
 const RESERVED = new Set(['ts', 'level', 'event']);
-const ERROR_FIELDS = ['code', 'delivery', 'action', 'retcode', 'status'];
+const ERROR_FIELDS = ['code', 'delivery', 'action', 'retcode', 'status', 'httpStatus', 'providerCode', 'traceId'];
 
 // Error 对象直接 JSON.stringify 会变成 {}，这里只取消息和少量诊断字段，不带调用栈。
 function serializeError(error) {

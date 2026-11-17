@@ -26,7 +26,7 @@
 │     · 长期记忆  fish-os Memory（隐私隔离）                    │
 │     · 当前时间  北京时间（问日期/时间直接答，不搜）            │
 │     · 短期历史  每个 peer 最近 6 条（3 轮）                    │
-│   → 调 DeepSeek Responses API                               │
+│   → 调 DeepSeek Responses API（60 秒内必有结果、花费有上限）│
 │   → 经 OneBot 发回 QQ（排队节流，逐条发送）                  │
 │   → 确认发出后写记忆（PostgreSQL）                           │
 └────────────────────────────────────────────────────────────┘
@@ -70,9 +70,9 @@ flowchart TD
 1. 你在 QQ 发一句 → QQ 服务器 → SnowLuma 里的 QQ 客户端；
 2. SnowLuma Hook 捕获 → 转成 OneBot v11 事件 → WS `:3001` 推给 fish-bot；
 3. fish-bot 检索该 peer 可见的记忆 + 拼 system prompt（人设/准则/记忆/时间/历史）；
-4. 调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成）；
+4. 先检查今天的花费是否已达上限、这个会话是否调用太频繁，再调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成），用量按官方价格估算后入账；
 5. 拿到回复 → 进入发送节流队列 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
-6. 失败降级：搜索 500/超时 → 重试 → 退回不搜再答，不把错误抛给用户。
+6. 失败降级：第一次失败（超时、限流、服务端错误、空回复）就换“不搜索、不思考”再试一次，60 秒内必有结果；仍然失败时只发固定提示，不把错误原文发给用户。
 
 ## 传输层（OneBot 客户端）
 
@@ -86,6 +86,18 @@ fish-bot 与 SnowLuma 之间只有一条正向 WebSocket 连接，由 `src/adapt
 
 每条消息的处理过程用 `messageKey` 串在日志里。详见 [Module 3 导读](module-03-onebot.md)。
 
+## 模型调用（DeepSeek 适配器）
+
+`src/model/` 负责调用模型本身，处理器只拿到可以发出的文字，或者说明原因的 `ModelError`：
+
+- 一次回复（含重试）最多 60 秒；最多两次尝试，第二次不搜索、不思考；
+- HTTP 200 也检查 `status`：生成失败会重试，被截断时保留到最后一个完整句子，被内容过滤时发婉拒提示；
+- 每次调用按官方价格估算花费，记进 `model_usage` 表；今天的花费达到上限（默认 20 元）后不再调用模型；
+- 每个会话每分钟最多 10 次、每小时最多 120 次；
+- 错误信息是固定说明，不带对方返回的原文。
+
+详见 [Module 4 导读](module-04-model.md)。
+
 ## 存储
 
 PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结构见 `migrations/`：
@@ -97,5 +109,6 @@ PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结�
 | `character_state` | 情绪、创建时间 |
 | `interests` | 兴趣及权重 |
 | `relationships` | 每个人的关系：互动次数、好感度、备注 |
+| `model_usage` | 模型用量账本：按北京时间的日期、会话、模型累计调用次数、token、搜索次数和估算花费（不存内容） |
 
 所有表带 `tenant_id`（目前只有 `default`）。详见 [Module 2 导读](module-02-storage.md)。

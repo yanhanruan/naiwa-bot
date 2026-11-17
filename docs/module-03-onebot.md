@@ -180,4 +180,4 @@ Node 22 自带的 WebSocket 在连接被拒绝时，**只触发 `error`，不触
 - 把连接状态接入 `bridge.getStatus()` 或 CLI（Module 9 / 10）。目前可以通过 `client.status()` 和日志查看。
 - 反向 WebSocket、HTTP 上报等其他 OneBot 连接方式。
 - `message_id` 跨重启稳定性：需要在 SnowLuma 重启前后各引用一次消息来核实。
-- 模型调用失败时，`reply.failed` 日志会带上 DeepSeek 返回的错误原文（`src/brain.js` 截取前 160 个字），不完全符合“日志只写标识、长度、耗时和结果”的约定。留给 Module 4（模型调用适配器）处理。
+- 模型调用失败时，`reply.failed` 日志会带上 DeepSeek 返回的错误原文（`src/brain.js` 截取前 160 个字），不完全符合“日志只写标识、长度、耗时和结果”的约定。留给 Module 4（模型调用适配器）处理。（已在 Module 4 解决：错误信息改为固定说明，只记状态码、对方的错误码和 trace id，见 [Module 4 导读](module-04-model.md)。）

@@ -109,7 +109,9 @@ for (const { name, open } of backends) {
 test('迁移可重复执行；失败的迁移整体回滚', async () => {
   const db = await connectPGlite();
   try {
-    assert.deepEqual(await migrate(db), ['001_init.sql']);
+    // 新增迁移文件时更新这里的列表。
+    const all = ['001_init.sql', '002_model_usage.sql'];
+    assert.deepEqual(await migrate(db), all);
     assert.deepEqual(await migrate(db), []);
 
     const dir = mkdtempSync(join(tmpdir(), 'naiwa-migrations-'));
@@ -121,7 +123,7 @@ test('迁移可重复执行；失败的迁移整体回滚', async () => {
       const { rows } = await db.query("SELECT to_regclass('half_done') AS t");
       assert.equal(rows[0].t, null);
       const versions = await db.query('SELECT version FROM schema_migrations ORDER BY version');
-      assert.deepEqual(versions.rows.map((r) => r.version), ['001_init.sql']);
+      assert.deepEqual(versions.rows.map((r) => r.version), all);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
