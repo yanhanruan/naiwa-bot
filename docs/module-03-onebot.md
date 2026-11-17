@@ -62,7 +62,7 @@ client.stop();    // 停止：不再重连，等待中的请求立即结束
 | `CONNECTION_LOST` | 等响应时连接断了 | `unknown` |
 | `STOPPED` | 客户端已停止 | 排队中的为 `not_sent`，已发出的为 `unknown` |
 
-为什么要区分：`not_sent` 的消息可以放心重试；`unknown` 的消息重试可能让群友收到两条一样的回复。处理器目前对两种失败都不记录这条回复（发送失败不当成已发生）。重试策略留给 Module 5。
+为什么要区分：`not_sent` 的消息可以放心重试；`unknown` 的消息重试可能让群友收到两条一样的回复。处理器目前对两种失败都不记录这条回复（发送失败不当成已发生）。重试策略留给 Module 5。（Module 5 已实现：只在没连上 OneBot、肯定没发出时等重连后补发一次，见 [Module 5 导读](module-05-runtime.md)。）
 
 ### 5. 发送节流
 
@@ -176,7 +176,7 @@ Node 22 自带的 WebSocket 在连接被拒绝时，**只触发 `error`，不触
 
 ## 本模块没做的
 
-- 发送失败后的重试、重复事件去重、消息排队处理（Module 5）。
+- 发送失败后的重试、重复事件去重、消息排队处理（Module 5）。（已在 Module 5 解决，见 [Module 5 导读](module-05-runtime.md)。）
 - 把连接状态接入 `bridge.getStatus()` 或 CLI（Module 9 / 10）。目前可以通过 `client.status()` 和日志查看。
 - 反向 WebSocket、HTTP 上报等其他 OneBot 连接方式。
 - `message_id` 跨重启稳定性：需要在 SnowLuma 重启前后各引用一次消息来核实。

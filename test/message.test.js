@@ -1,18 +1,23 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import {
   Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook, OneBotError,
-  ModelError,
+  ModelError, MessageInbox, MemoryInbox, RUNTIME_DEFAULTS,
 } from '../src/index.js';
 import { createQQHandler, NOTICES } from '../src/qq-handler.js';
-import { openFish, testDb, closeTestDb, captureLogger } from './helpers.js';
+import { openFish, testDb, closeTestDb, captureLogger, waitFor } from './helpers.js';
 
 after(closeTestDb);
+
+// 测试事件的时间固定；处理器的时钟设在它之后 5 秒，消息就不会被当成“太旧”。
+const EVENT_TIME = 1700000000;
+const fixtureClock = () => EVENT_TIME * 1000 + 5000;
 
 function event(overrides = {}) {
   return {
     post_type: 'message', message_type: 'group', sub_type: 'normal',
-    self_id: 900, user_id: 101, group_id: 200, message_id: 1, time: 1700000000,
+    self_id: 900, user_id: 101, group_id: 200, message_id: 1, time: EVENT_TIME,
     sender: { nickname: '小甲', card: '甲的群名片' },
     message: [{ type: 'text', data: { text: '你好' } }], ...overrides,
   };
@@ -159,7 +164,8 @@ test('@ 段保留显示名；模型信封用会话内代号区分发言者和被
 });
 
 // 多数入口测试关注身份与记录，不关心群聊闸门，因此默认沿用“群里每条都回复”的兼容模式；闸门有单独测试。
-async function setup(t, { replyToAllGroupMessages = true } = {}) {
+// runtime：传给 createQQHandler 的其他参数（inbox、clock、maxAgeMs……）。
+async function setup(t, { replyToAllGroupMessages = true, ...runtime } = {}) {
   const fish = await openFish();
   const requests = [], sent = [];
   const logs = captureLogger();
@@ -171,12 +177,15 @@ async function setup(t, { replyToAllGroupMessages = true } = {}) {
     sendGroupMsg: async (id, message, opts) => ({ message_id: 9000 + sent.push({ kind: 'group', id, message, opts }) }),
     sendPrivateMsg: async (id, message, opts) => ({ message_id: 9000 + sent.push({ kind: 'private', id, message, opts }) }),
   };
-  const handle = createQQHandler({
+  const options = {
     fish, brain, getClient: () => client, persona: '测试角色',
-    now: () => new Date('2026-11-12T00:00:00Z'), logger: logs.logger,
-    replyToAllGroupMessages,
-  });
-  return { fish, handle, requests, sent, get errors() { return errors.list; }, brain, logs };
+    now: () => new Date('2026-11-12T00:00:00Z'), logger: logs.logger, clock: fixtureClock,
+    replyToAllGroupMessages, ...runtime,
+  };
+  const handle = createQQHandler(options);
+  // 用同样的参数（可以替换其中几项）再建一个处理器，例如模拟重启、换一个 OneBot 客户端。
+  const another = (overrides = {}) => createQQHandler({ ...options, ...overrides });
+  return { fish, handle, stop: handle.stop, another, client, requests, sent, get errors() { return errors.list; }, brain, logs };
 }
 
 const userMessages = (request) => request.filter((m) => m.role === 'user').map((m) => JSON.parse(m.content));
@@ -277,6 +286,173 @@ test('入口模型失败记录内部错误，聊天对象只收到通用提示',
 });
 
 const sentTexts = (h) => h.sent.map((s) => s.message[0].data.text);
+
+// 让模型调用卡住，直到测试逐个放行：gates[i]() 放行第 i 次调用。
+function gatedBrain(h) {
+  const gates = [];
+  h.brain.chat = async (messages) => {
+    const n = h.requests.push(messages);
+    await new Promise((resolve) => gates.push(resolve));
+    return `回复${n}`;
+  };
+  return gates;
+}
+
+test('同一会话的连续消息逐条处理：后一条看得到前一条的对话，历史不会被覆盖', async (t) => {
+  const h = await setup(t);
+  const gates = gatedBrain(h);
+  const done = [1, 2, 3].map((id) => h.handle(event({ message_id: id, message: `第${id}条` })));
+  for (let i = 0; i < 3; i += 1) {
+    await waitFor(() => gates.length > i, { what: `第 ${i + 1} 次模型调用` });
+    assert.equal(gates.length, i + 1, '同一会话同时只应有一次模型调用');
+    gates[i]();
+  }
+  await Promise.all(done);
+  const history = h.requests[2].filter((m) => m.role !== 'system');
+  assert.deepEqual(history.map((m) => m.role), ['user', 'assistant', 'user', 'assistant', 'user']);
+  assert.deepEqual(history.filter((m) => m.role === 'assistant').map((m) => m.content), ['回复1', '回复2']);
+  assert.deepEqual(sentTexts(h), ['回复1', '回复2', '回复3']);
+});
+
+test('不同会话的消息并行处理，互不等待', async (t) => {
+  const h = await setup(t);
+  const gates = gatedBrain(h);
+  const a = h.handle(event({ group_id: 201 }));
+  const b = h.handle(event({ group_id: 202 }));
+  await waitFor(() => gates.length === 2, { what: '两个会话同时在调用模型' });
+  gates[1]();
+  await b; // 第二个会话不必等第一个
+  gates[0]();
+  await a;
+  assert.equal(h.sent.length, 2);
+});
+
+test('同一条消息收到两次（先后或同时）：只处理一次、只回复一次', async (t) => {
+  const h = await setup(t);
+  await h.handle(event({ message_id: 7 }));
+  await h.handle(event({ message_id: 7 }));
+  await Promise.all([h.handle(event({ message_id: 8 })), h.handle(event({ message_id: 8 }))]);
+  assert.equal(h.requests.length, 2);
+  assert.equal(h.sent.length, 2);
+  assert.equal(h.logs.find('message.duplicate').length, 2);
+});
+
+test('用数据库记录消息：重启后再收到同一条也不会重复回复；记录里如实写明结果', async (t) => {
+  const inbox = new MessageInbox({ db: await testDb(), tenantId: `test-${randomUUID()}` });
+  const h = await setup(t, { inbox });
+  await h.handle(event({ message_id: 42 }));
+  const restarted = h.another(); // 模拟重启：新的处理器，同一个数据库
+  await restarted(event({ message_id: 42 }));
+  assert.equal(h.sent.length, 1);
+  assert.deepEqual(await inbox.get('qq:account:900:conversation:group:200:message:42'), {
+    messageKey: 'qq:account:900:conversation:group:200:message:42',
+    conversationKey: 'qq:account:900:conversation:group:200',
+    status: 'replied', outcome: 'replied', errorCode: undefined, delivery: undefined, sentMessageId: '9001', sendAttempts: 1,
+  });
+});
+
+test('太旧的消息不再回复：收到时已超时的直接跳过；排队期间超时的也丢弃', async (t) => {
+  let clock = fixtureClock();
+  const h = await setup(t, { clock: () => clock, maxAgeMs: 60_000 });
+  await h.handle(event({ message_id: 1, time: EVENT_TIME - 120 })); // 两分钟前的消息
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.logs.find('message.skipped')[0].reason, 'stale');
+
+  const gates = gatedBrain(h);
+  const first = h.handle(event({ message_id: 2 }));
+  await waitFor(() => gates.length === 1);
+  const second = h.handle(event({ message_id: 3 })); // 排在第一条后面
+  await waitFor(() => h.logs.find('message.accepted').length === 2);
+  clock += 61_000; // 第一条处理了很久
+  gates[0]();
+  await Promise.all([first, second]);
+  assert.equal(h.requests.length, 1, '排队太久的第二条不应调用模型');
+  const [dropped] = h.logs.find('message.dropped');
+  assert.equal(dropped.reason, 'stale');
+  assert.equal(dropped.messageKey, 'qq:account:900:conversation:group:200:message:3');
+});
+
+test('同一会话排队太多：超过上限的新消息不处理，记为 dropped', async (t) => {
+  const inbox = new MemoryInbox();
+  const h = await setup(t, { maxPendingPerConversation: 1, inbox });
+  const gates = gatedBrain(h);
+  const first = h.handle(event({ message_id: 1 }));
+  await waitFor(() => gates.length === 1);
+  const second = h.handle(event({ message_id: 2 }));
+  await waitFor(() => h.logs.find('message.accepted').length === 2);
+  await h.handle(event({ message_id: 3 })); // 队列已满，立即返回
+  assert.equal(h.logs.find('message.dropped')[0].reason, 'queue_full');
+  assert.equal((await inbox.get('qq:account:900:conversation:group:200:message:3')).status, 'dropped');
+  gates[0]();
+  await waitFor(() => gates.length === 2);
+  gates[1]();
+  await Promise.all([first, second]);
+  assert.deepEqual(sentTexts(h), ['回复1', '回复2']);
+});
+
+test('没连上 OneBot（肯定没发出）：等重连后再发一次，发出后照常记录', async (t) => {
+  const inbox = new MemoryInbox();
+  const h = await setup(t, { inbox });
+  let calls = 0;
+  let waitedMs = null;
+  const client = {
+    sendGroupMsg: async () => {
+      calls += 1;
+      if (calls === 1) throw new OneBotError('NOT_CONNECTED', '未连接 OneBot，未发送', { delivery: 'not_sent', action: 'send_group_msg' });
+      return { message_id: 9100 };
+    },
+    waitForConnection: async (ms) => { waitedMs = ms; return true; },
+  };
+  await h.another({ getClient: () => client })(event());
+  assert.equal(calls, 2);
+  assert.equal(waitedMs, RUNTIME_DEFAULTS.sendRetryWaitMs);
+  const [done] = h.logs.find('message.done');
+  assert.deepEqual([done.outcome, done.sendAttempts], ['replied', 2]);
+  assert.equal(h.logs.find('send.retry_wait').length, 1);
+  assert.equal(await h.fish.memory.count(), 1);
+  const record = await inbox.get('qq:account:900:conversation:group:200:message:1');
+  assert.deepEqual([record.status, record.sendAttempts, record.sentMessageId], ['replied', 2, '9100']);
+});
+
+test('发送失败不记成已回复：等不到重连、结果未知、SnowLuma 拒绝，都只发一次，也不写记忆', async (t) => {
+  const cases = [
+    { error: new OneBotError('NOT_CONNECTED', '未连接', { delivery: 'not_sent' }), connected: false, delivery: 'not_sent', waits: 1 },
+    { error: new OneBotError('TIMEOUT', '超时，结果未知', { delivery: 'unknown' }), connected: true, delivery: 'unknown', waits: 0 },
+    { error: new OneBotError('ACTION_FAILED', '发送失败', { delivery: 'not_sent', retcode: 100 }), connected: true, delivery: 'not_sent', waits: 0 },
+  ];
+  for (const c of cases) {
+    const inbox = new MemoryInbox();
+    const h = await setup(t, { inbox });
+    let calls = 0;
+    let waits = 0;
+    const client = {
+      sendGroupMsg: async () => { calls += 1; throw c.error; },
+      waitForConnection: async () => { waits += 1; return c.connected; },
+    };
+    await h.another({ getClient: () => client })(event());
+    assert.equal(calls, 1, c.error.code);
+    assert.equal(waits, c.waits, c.error.code);
+    assert.equal(await h.fish.memory.count(), 0, c.error.code);
+    const record = await inbox.get('qq:account:900:conversation:group:200:message:1');
+    assert.deepEqual([record.status, record.errorCode, record.delivery], ['send_failed', c.error.code, c.delivery]);
+    const [done] = h.logs.find('message.done');
+    assert.deepEqual([done.outcome, done.delivery], ['send_failed', c.delivery]);
+  }
+});
+
+test('退出时：停止接收新消息，等手上的处理完再返回', async (t) => {
+  const h = await setup(t);
+  const gates = gatedBrain(h);
+  const inflight = h.handle(event({ message_id: 1 }));
+  await waitFor(() => gates.length === 1);
+  const stopping = h.stop(2000);
+  await h.handle(event({ message_id: 2 })); // 退出过程中收到的新消息不再处理
+  gates[0]();
+  assert.equal(await stopping, 0);
+  await inflight;
+  assert.equal(h.sent.length, 1);
+  assert.equal(h.logs.find('message.ignored').filter((e) => e.reason === 'shutting_down').length, 1);
+});
 
 test('花费上限：每次被叫到都回固定提示；会话限速：每段受限时间只提示一次；都不记录，也不算错误', async (t) => {
   const h = await setup(t);
@@ -420,7 +596,7 @@ test('发送失败不记录：历史、记忆和关系都不把未送达的回�
   const client = { sendGroupMsg: async () => { throw new Error('未连接'); } };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色',
-    logger: h.logs.logger, replyToAllGroupMessages: true,
+    logger: h.logs.logger, replyToAllGroupMessages: true, clock: fixtureClock,
   });
   await handle(event({ message: '第一句' }));
   assert.deepEqual(h.logs.find('send.failed').map((e) => e.error.message), ['未连接']);
@@ -494,6 +670,7 @@ test('发送结果未知（超时）：不记录，日志标明 delivery=unknown
   };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色', logger: h.logs.logger, replyToAllGroupMessages: true,
+    clock: fixtureClock,
   });
   await handle(event());
   const [failed] = h.logs.find('send.failed');

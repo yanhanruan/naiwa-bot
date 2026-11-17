@@ -119,6 +119,7 @@ export class OneBotClient {
     this.lastBadFrameLogAt = -Infinity;
     this.timers = { connect: null, reconnect: null, liveness: null };
     this.firstOpen = null;
+    this.connectionWaiters = new Set(); // waitForConnection() 的等待者，连上时传 true，停止时传 false
   }
 
   get connected() {
@@ -152,7 +153,28 @@ export class OneBotClient {
     this.throttle.stop();
     this._failPending(new OneBotError('STOPPED', '客户端已停止，请求结果未知', { delivery: 'unknown' }));
     this.firstOpen?.resolve(false);
+    this._settleConnectionWaiters(false);
     this.log.info('onebot.stopped', { msg: '已停止 OneBot 客户端' });
+  }
+
+  // 等到连上 OneBot：已经连着就立即返回 true；超时或客户端停止返回 false。不会 reject。
+  // 断线期间没发出去（NOT_CONNECTED）的消息，可以等重连后再发一次。
+  waitForConnection(timeoutMs) {
+    if (this.connected) return Promise.resolve(true);
+    if (this.state === 'stopped') return Promise.resolve(false);
+    return new Promise((resolve) => {
+      const settle = (connected) => {
+        clearTimeout(timer);
+        this.connectionWaiters.delete(settle);
+        resolve(connected);
+      };
+      const timer = setTimeout(() => settle(false), timeoutMs);
+      this.connectionWaiters.add(settle);
+    });
+  }
+
+  _settleConnectionWaiters(connected) {
+    for (const settle of [...this.connectionWaiters]) settle(connected);
   }
 
   status() {
@@ -262,6 +284,7 @@ export class OneBotClient {
       this.log.info('onebot.connected', { msg: '已连接 OneBot', endpoint: this.endpoint, reconnects: this.reconnects });
       this._notifyStatus(true);
       this.firstOpen?.resolve(true);
+      this._settleConnectionWaiters(true);
     };
     ws.onmessage = (ev) => {
       if (!current()) return;

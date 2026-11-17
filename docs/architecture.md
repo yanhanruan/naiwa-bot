@@ -69,7 +69,7 @@ flowchart TD
 
 1. 你在 QQ 发一句 → QQ 服务器 → SnowLuma 里的 QQ 客户端；
 2. SnowLuma Hook 捕获 → 转成 OneBot v11 事件 → WS `:3001` 推给 fish-bot；
-3. fish-bot 检索该 peer 可见的记忆 + 拼 system prompt（人设/准则/记忆/时间/历史）；
+3. fish-bot 先去重（同一条消息只处理一次），再放进这个会话的队列：同一会话逐条处理，前一条回复完才处理下一条；轮到时检索该 peer 可见的记忆 + 拼 system prompt（人设/准则/记忆/时间/历史）；
 4. 先检查今天的花费是否已达上限、这个会话是否调用太频繁，再调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成），用量按官方价格估算后入账；
 5. 拿到回复 → 进入发送节流队列 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
 6. 失败降级：第一次失败（超时、限流、服务端错误、空回复）就换“不搜索、不思考”再试一次，60 秒内必有结果；仍然失败时只发固定提示，不把错误原文发给用户。
@@ -98,6 +98,18 @@ fish-bot 与 SnowLuma 之间只有一条正向 WebSocket 连接，由 `src/adapt
 
 详见 [Module 4 导读](module-04-model.md)。
 
+## 消息处理运行时
+
+`src/runtime/` 决定消息按什么顺序、以什么方式处理：
+
+- 同一会话的消息逐条处理，后一条看得到前一条的对话；不同会话并行，同时最多 4 个；每个会话最多排队 5 条；
+- 每条叫到奶蛙的消息记进 `inbound_messages`：24 小时内同一条只处理一次，重启后也能识别；处理结果如实记录，发送失败不会被记成已回复；
+- 超过 3 分钟的消息不再回复；
+- 没连上 OneBot、肯定没发出的回复，等重连后补发一次；结果未知的不重发；
+- 退出时等手上的消息处理完（最多 10 秒），启动时把上次没处理完的标为中断。
+
+详见 [Module 5 导读](module-05-runtime.md)。
+
 ## 存储
 
 PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结构见 `migrations/`：
@@ -110,5 +122,6 @@ PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结�
 | `interests` | 兴趣及权重 |
 | `relationships` | 每个人的关系：互动次数、好感度、备注 |
 | `model_usage` | 模型用量账本：按北京时间的日期、会话、模型累计调用次数、token、搜索次数和估算花费（不存内容） |
+| `inbound_messages` | 入站消息记录：每条叫到奶蛙的消息的处理状态和结果，用于去重（不存内容，保留 30 天） |
 
 所有表带 `tenant_id`（目前只有 `default`）。详见 [Module 2 导读](module-02-storage.md)。

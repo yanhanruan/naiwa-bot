@@ -405,6 +405,27 @@ test('stop：等待中的请求结果未知、排队中的未发送，都立即�
   assert.equal(client.status().state, 'stopped');
 });
 
+test('waitForConnection：已连着立即返回 true；断线后等到重连返回 true；超时或停止返回 false', async () => {
+  const server = await fakeOneBot();
+  const { client } = makeClient(server);
+  await client.start();
+  assert.equal(await client.waitForConnection(10), true);
+
+  server.dropAll();
+  await waitFor(() => !client.connected, { what: '断线' });
+  assert.equal(await client.waitForConnection(2000), true, '重连后应返回 true');
+  assert.equal(client.connected, true);
+
+  await server.close(); // 之后一直连不上
+  await waitFor(() => !client.connected, { what: '服务端关闭后断线' });
+  assert.equal(await client.waitForConnection(50), false, '超时返回 false');
+
+  const pending = client.waitForConnection(5000);
+  client.stop();
+  assert.equal(await pending, false, '停止时返回 false');
+  assert.equal(await client.waitForConnection(5000), false, '停止后立即返回 false');
+});
+
 test('QQ 账号离线、恢复在线：状态和日志都反映出来', async () => {
   const server = await fakeOneBot();
   const { client, logs } = makeClient(server);

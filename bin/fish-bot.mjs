@@ -21,6 +21,7 @@ import { OneBotClient } from '../src/adapters/onebot.js';
 import { DeepSeekBrain } from '../src/model/brain.js';
 import { ModelUsageLedger } from '../src/model/usage-ledger.js';
 import { ConversationRateLimiter } from '../src/model/rate-limiter.js';
+import { MessageInbox } from '../src/runtime/inbox.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { loggerFromEnv } from '../src/log.js';
 
@@ -87,7 +88,23 @@ function record(ev) {
   }
 }
 
-const handleEvent = createQQHandler({ fish, brain, getClient: () => client, persona, socialRules, logger: log });
+// 入站消息记录：去重、记录每条消息的处理结果（见 docs/module-05-runtime.md）。
+// 上次退出时没处理完的消息标为 abandoned；超过 30 天的记录每天清理一次。
+const inbox = new MessageInbox({ db, tenantId: fish.tenantId });
+const interrupted = await inbox.recoverInterrupted();
+if (interrupted) log.warn('runtime.recovered', { msg: '上次退出时有消息没处理完，已标为中断', count: interrupted });
+async function pruneInbox() {
+  try {
+    const removed = await inbox.prune();
+    if (removed) log.info('runtime.pruned', { msg: '已清理 30 天前的消息记录', count: removed });
+  } catch (error) {
+    log.error('runtime.prune_failed', { msg: '清理消息记录失败', error });
+  }
+}
+await pruneInbox();
+setInterval(() => void pruneInbox(), 24 * 3_600_000).unref();
+
+const handleEvent = createQQHandler({ fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox });
 // 一个长期存在的客户端：断线重连、请求超时、无响应探测、发送节流都在客户端内部完成。
 const client = new OneBotClient({
   url: ws,
@@ -101,9 +118,16 @@ const client = new OneBotClient({
 
 let stopping = false;
 async function shutdown(signal) {
-  if (stopping) return;
+  if (stopping) {
+    // 正在等手上的消息处理完时再按一次 Ctrl-C：立即退出。没处理完的消息下次启动时标为中断。
+    log.warn('bot.force_exit', { msg: '强制退出', signal });
+    process.exit(1);
+  }
   stopping = true;
-  log.info('bot.stopping', { msg: '准备退出', signal });
+  log.info('bot.stopping', { msg: '准备退出，先处理完手上的消息（最多 10 秒）', signal });
+  // 先停止接收新消息、等手上的处理完（发送还需要连接），再断开 OneBot。
+  const unfinished = await handleEvent.stop(10_000);
+  if (unfinished) log.warn('runtime.stopped', { msg: '还有消息没处理完，下次启动时标为中断', unfinished });
   client.stop();
   try {
     await fish.stop();

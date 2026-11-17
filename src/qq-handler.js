@@ -5,6 +5,16 @@ import { seg } from './adapters/onebot.js';
 import { messageForModel, createAliasBook } from './message.js';
 import { createLogger } from './log.js';
 import { ModelError } from './model/errors.js';
+import { ConversationQueue, QueueError } from './runtime/conversation-queue.js';
+import { MemoryInbox } from './runtime/inbox.js';
+
+// 消息处理运行时的默认参数（见 docs/module-05-runtime.md）。
+export const RUNTIME_DEFAULTS = {
+  maxConcurrent: 4, // 同时处理的会话数上限
+  maxPendingPerConversation: 5, // 每个会话最多排队几条（不含正在处理的）
+  maxAgeMs: 3 * 60_000, // 消息超过这个时间（收到时或排到时）就不再回复
+  sendRetryWaitMs: 20_000, // 没连上 OneBot 时，最多等多久重连后再发一次
+};
 
 // 模型给不出回复时发给聊天对象的固定提示，不含任何内部错误信息。
 export const NOTICES = {
@@ -52,18 +62,32 @@ function nowText(date) {
 const SENT_MESSAGE_LIMIT = 2000;
 
 // 从 bin 提取现有聊天逻辑，便于用模拟模型/传输测试实际入口。
-// 本模块尚无队列、去重或参与决策；这些由后续 module 5 / 7 实现。
+// 消息处理运行时（Module 5）：
+// - 同一会话的消息按到达顺序逐条处理，后一条看得到前一条的对话；不同会话并行（见 runtime/conversation-queue.js）。
+// - 同一条消息只处理一次：去重和每条消息的处理结果记在 inbox 里（见 runtime/inbox.js），发送失败不会被记成已回复。
+// - 太旧的消息（收到时或排到时超过 maxAgeMs）不再回复。
+// - 没连上 OneBot、肯定没发出的回复，等重连后再发一次；结果未知的不重发，免得对方收到两条。
 // 群聊临时闸门：私聊总是回复；群聊只在被 @ 或有人引用奶蛙自己发出的消息时回复。
 // replyToAllGroupMessages 为 true 时恢复旧行为（群里每条含文本的消息都回复），仅供兼容；module 7 会替换这套规则。
 // 日志：每条被处理的消息都带 messageKey，依次记录 message.accepted → （各阶段失败）→ message.done。
 // 日志里不写聊天正文、回复内容和昵称，只写标识、长度、耗时和结果。
+//
+// 返回 handleEvent(event)：处理完这条消息（或决定不处理）时 resolve。
+// handleEvent.stop(timeoutMs)：停止接收新消息，等已经接收的处理完，返回没处理完的条数。
 export function createQQHandler({ fish, brain, getClient, persona, socialRules = '', now = () => new Date(),
   logger = createLogger(), replyToAllGroupMessages = false,
+  inbox = new MemoryInbox(), clock = () => Date.now(),
+  maxConcurrent = RUNTIME_DEFAULTS.maxConcurrent,
+  maxPendingPerConversation = RUNTIME_DEFAULTS.maxPendingPerConversation,
+  maxAgeMs = RUNTIME_DEFAULTS.maxAgeMs,
+  sendRetryWaitMs = RUNTIME_DEFAULTS.sendRetryWaitMs,
 }) {
   const histories = new Map(); // conversation.key -> 模型消息；用户关系使用 sender.key。
   const aliasBooks = new Map(); // conversation.key -> 会话内代号簿；与历史一样只在进程内有效。
   const sentMessages = new Set(); // 奶蛙发出的消息 key，用于判断“引用了奶蛙”；只在进程内，按插入顺序淘汰。
   const historyTurns = 6;
+  const queue = new ConversationQueue({ maxConcurrent, maxPending: maxPendingPerConversation });
+  let stopping = false;
 
   function rememberSent(message, result) {
     let id;
@@ -154,8 +178,33 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     await fish.touch(sender.key, { name: sender.nickname, deltaSentiment: 0.05 });
   }
 
-  return async function handleEvent(event) {
-    const startedAt = Date.now();
+  // 把处理结果写进消息记录。写失败只记日志：不能因为记录出错影响聊天。
+  async function saveResult(message, log, result) {
+    try {
+      await inbox.update(message.key, result);
+    } catch (error) {
+      log.error('inbox.failed', { msg: '更新消息记录失败', status: result.status, error });
+    }
+  }
+
+  // 发送一条回复。没连上 OneBot（肯定没发出）时，等重连后再发一次；其他失败不重试：
+  // 结果未知的（超时、等响应时断线）重发可能让对方收到两条；SnowLuma 明确拒绝的（例如被禁言）重发也没用。
+  async function deliver(message, text, log) {
+    for (let attempts = 1; ; attempts += 1) {
+      try {
+        return { sent: await send(message, text), attempts };
+      } catch (error) {
+        const retryable = attempts === 1 && error?.code === 'NOT_CONNECTED' && error?.delivery === 'not_sent';
+        if (!retryable) return { error, attempts };
+        log.warn('send.retry_wait', { msg: '没连上 OneBot，等重连后再发一次', waitMs: sendRetryWaitMs });
+        const connected = await getClient()?.waitForConnection?.(sendRetryWaitMs);
+        if (!connected) return { error, attempts };
+      }
+    }
+  }
+
+  async function handleEvent(event) {
+    const receivedAt = Date.now();
     let message;
     try {
       message = normalizeOneBotMessage(event);
@@ -175,7 +224,56 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       log.debug('message.ignored', { reason: 'not_addressed' });
       return;
     }
+    if (stopping) {
+      log.info('message.ignored', { reason: 'shutting_down' });
+      return;
+    }
+
+    // 去重：同一条消息只处理一次。用数据库记录时，同时到达两次或重启以后再收到也能识别。
+    let first = true;
+    try {
+      first = await inbox.claim(message);
+    } catch (error) {
+      log.error('inbox.failed', { msg: '读写消息记录失败，按新消息处理', error });
+    }
+    if (!first) {
+      log.info('message.duplicate', { msg: '重复收到的消息，已跳过' });
+      return;
+    }
+    // 收到时就已经太旧（例如奶蛙停机期间积压的消息），不再回复。
+    const ageMs = clock() - message.ts;
+    if (ageMs > maxAgeMs) {
+      log.info('message.skipped', { msg: '消息太旧，不再回复', reason: 'stale', ageMs });
+      await saveResult(message, log, { status: 'skipped', outcome: 'stale' });
+      return;
+    }
     log.info('message.accepted', { conversation: message.conversation.kind, textChars: message.text.length });
+
+    const task = () => processMessage(message, log, receivedAt).catch(async (error) => {
+      // 正常情况下各阶段的错误都已处理；走到这里是代码问题。
+      log.error('message.failed', { msg: '处理消息时出现意外错误', error });
+      await saveResult(message, log, { status: 'abandoned', outcome: 'internal_error' });
+    });
+    try {
+      await queue.run(message.conversation.key, task);
+    } catch (error) {
+      if (!(error instanceof QueueError)) throw error;
+      const reason = error.code === 'QUEUE_FULL' ? 'queue_full' : 'shutting_down';
+      log.warn('message.dropped', { msg: reason === 'queue_full' ? '这个会话排队的消息太多，本条不处理' : '正在退出，本条不处理', reason });
+      await saveResult(message, log, { status: 'dropped', outcome: reason });
+    }
+  }
+
+  // 排到这条消息时调用；同一会话同时只有一条在这里。
+  async function processMessage(message, log, receivedAt) {
+    const queuedMs = Date.now() - receivedAt;
+    const ageMs = clock() - message.ts;
+    if (ageMs > maxAgeMs) {
+      log.warn('message.dropped', { msg: '排队太久，不再回复', reason: 'stale', ageMs, queuedMs });
+      await saveResult(message, log, { status: 'dropped', outcome: 'stale' });
+      return;
+    }
+    await saveResult(message, log, { status: 'processing' });
 
     let turn = null;
     let notice = null;
@@ -193,21 +291,24 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     }
     const replyMs = Date.now() - replyStartedAt;
     if (!turn && !notice) {
-      log.info('message.done', { outcome, errorCode, replyMs, totalMs: Date.now() - startedAt });
+      log.info('message.done', { outcome, errorCode, queuedMs, replyMs, totalMs: Date.now() - receivedAt });
+      await saveResult(message, log, { status: 'silent', outcome, errorCode });
       return;
     }
 
     const sendStartedAt = Date.now();
-    let sent;
-    try {
-      sent = await send(message, turn?.reply ?? notice);
-    } catch (error) {
-      // 未送达（或不确定是否送达）就不记录；delivery 说明是否可能已发出，重试策略留待 module 5。
-      log.error('send.failed', { msg: '发送失败，本条不记录', error, delivery: error?.delivery ?? 'unknown' });
-      log.warn('message.done', { outcome: 'send_failed', errorCode, replyMs, sendMs: Date.now() - sendStartedAt, totalMs: Date.now() - startedAt });
+    const { sent, error: sendError, attempts } = await deliver(message, turn?.reply ?? notice, log);
+    const sendMs = Date.now() - sendStartedAt;
+    if (sendError) {
+      // 没发出去（或不确定是否发出）就不记录，也不记成已回复；delivery 说明是否可能已经发出。
+      const delivery = sendError?.delivery ?? 'unknown';
+      log.error('send.failed', { msg: '发送失败，本条不记录', error: sendError, delivery, sendAttempts: attempts });
+      log.warn('message.done', {
+        outcome: 'send_failed', errorCode: sendError?.code, delivery, queuedMs, replyMs, sendMs, sendAttempts: attempts, totalMs: Date.now() - receivedAt,
+      });
+      await saveResult(message, log, { status: 'send_failed', outcome: 'send_failed', errorCode: sendError?.code, delivery, sendAttempts: attempts });
       return;
     }
-    const sendMs = Date.now() - sendStartedAt;
 
     // 固定提示不是角色的真实回复，不进入历史与记忆。
     let recorded = false;
@@ -221,7 +322,18 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       }
     }
     log.info('message.done', {
-      outcome, errorCode, recorded, sentMessageId: sent?.message_id, replyChars: turn?.reply.length, replyMs, sendMs, totalMs: Date.now() - startedAt,
+      outcome, errorCode, recorded, sentMessageId: sent?.message_id, replyChars: turn?.reply.length,
+      queuedMs, replyMs, sendMs, sendAttempts: attempts > 1 ? attempts : undefined, totalMs: Date.now() - receivedAt,
     });
+    await saveResult(message, log, {
+      status: turn ? 'replied' : 'notice', outcome, errorCode, sentMessageId: sent?.message_id, sendAttempts: attempts,
+    });
+  }
+
+  // 停止接收新消息，等已经接收的处理完（最多 timeoutMs）。返回没处理完的条数；它们在下次启动时被标为 abandoned。
+  handleEvent.stop = (timeoutMs = 10_000) => {
+    stopping = true;
+    return queue.close(timeoutMs);
   };
+  return handleEvent;
 }

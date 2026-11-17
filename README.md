@@ -6,7 +6,7 @@
 
 > 纯 ESM，Node ≥ 22.4（用到内置的 WebSocket）。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite）和本地假 OneBot 服务端，`npm test` 不需要启动任何服务。
 
-> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
+> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)；Module 5（消息处理运行时：同一会话逐条处理、去重、发送失败如实记录与补发）见 [Module 5 导读](docs/module-05-runtime.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
 
 ## 架构
 
@@ -56,6 +56,9 @@ naiwa-bot/
 │   │   ├── pricing.js        # 官方价格表与花费估算
 │   │   ├── usage-ledger.js   # 每日用量账本（PostgreSQL）
 │   │   └── rate-limiter.js   # 按会话限速
+│   ├── runtime/
+│   │   ├── conversation-queue.js # 会话队列：同一会话逐条处理，不同会话并行
+│   │   └── inbox.js              # 入站消息记录：去重、记录每条消息的处理结果
 │   ├── adapters/
 │   │   ├── onebot.js         # OneBot v11 客户端（重连、超时、假活探测）
 │   │   ├── send-throttle.js  # 发送节流
@@ -168,11 +171,14 @@ OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`
 
 模型调用的测试用一个本地 HTTP 服务扮演 DeepSeek，覆盖空回复、截断、内容过滤、限流、超时、各类错误，以及每日花费上限和按会话限速，见 [Module 4 导读](docs/module-04-model.md)。
 
+消息处理运行时的测试覆盖连续消息看得到前文、重复消息只回复一次（含重启后）、太旧的消息不回复、排队上限、发送失败的重试与不重试、退出时等待，见 [Module 5 导读](docs/module-05-runtime.md)。
+
 ## 诚实的状态标注
 
 - ✅ 已实现并测试：人格引擎、长期记忆（含隐私隔离/导出/删除）、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
 - ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。
 - ✅ 模型调用：DeepSeek Responses API，一次回复 60 秒内必有结果、最多两次尝试、错误分类、按官方价格估算花费、每日花费上限、按会话限速（Module 4）。
+- ✅ 消息处理运行时：同一会话逐条处理、不同会话并行，重复消息只处理一次，太旧的消息不回复，发送失败如实记录、没连上时重连后补发，退出时等手上的消息处理完（Module 5）。
 - ✅ B站只读内容获取（Phase 2 之一）：热门 + 搜索真实拉取，转成统一 `content.read` 事件。
 - ✅ 存储：PostgreSQL + 编号迁移 + pg_dump 备份/恢复 + 旧 JSON 导入（Module 2）。
 - ⬜ 尚未接通：小红书/抖音只读（需账号/签名授权）、把 fish-os 记忆作为 DSH 工具注入 QQ 会话、LLM 摘要器/向量检索（当前规则检索 + 截断摘要，接口已预留）。
