@@ -40,15 +40,22 @@ export const PLATFORMS = new Set([
   'character-os',
 ]);
 
-// 隐私可见性：self / public / private:<peerId> / group:<groupId> / conversation:<conversationKey>
-// conversation 表示“只在这个会话里可见”（私聊或群聊均可），与“属于某个人”的 private 是不同语义。
+// 隐私可见性：self / public / private:<peerId> / group:<groupId> / conversation:<conversationKey> / person:<personKey>
+// - conversation：只在这个会话里可见（私聊或群聊均可）。
+// - private：某个人的私事，只对这个人可见。
+// - person：对这个人的印象，“跟着人走”：这个人在任何群或私聊发言时都可以召回，所以只能放群里也能说的内容。
 export const scope = {
   SELF: 'self',
   PUBLIC: 'public',
   private: (peerId) => `private:${peerId}`,
   group: (groupId) => `group:${groupId}`,
   conversation: (conversationKey) => `conversation:${conversationKey}`,
+  person: (personKey) => `person:${personKey}`,
 };
+
+// 运维身份：能看到全部记忆。只给 CLI 的查看、导出、删除这类管理操作用，聊天流程不能用。
+// 以 @ 开头，不会和任何会话、用户 key 撞上。
+export const OPERATOR = '@operator';
 
 export function clamp01(n) {
   if (typeof n !== 'number' || Number.isNaN(n)) return 0.5;
@@ -109,14 +116,18 @@ export function validateCharacterState(st) {
   return { ok: errors.length === 0, errors };
 }
 
-// 判断某条记忆对 requester 是否可见（隐私隔离核心）。
-// requester === 'self' 表示鱼自己（可看全部）；否则按 access 匹配。
+// 判断某条记忆对 requester 是否可见（隐私隔离核心）。必须与 src/memory.js 的 visibleSql 保持一致。
+// - OPERATOR：运维，看全部。
+// - 'self'：鱼自己，只看自我记忆和公开记忆。不再能看全部记录：聊天流程以 self 身份读取时，不能读到任何会话的私有内容。
+// - 其他：按 access 匹配会话、个人。
 export function visibleTo(rec, requester) {
-  if (requester === 'self') return true;
+  if (requester === OPERATOR) return true;
   const a = rec.access;
   if (a === 'public') return true;
+  if (requester === 'self') return a === 'self';
   if (a === `private:${requester}`) return true;
   if (a === `conversation:${requester}`) return true;
+  if (a === `person:${requester}`) return true;
   if (a.startsWith('group:')) {
     return (rec.peers || []).includes(requester);
   }

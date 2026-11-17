@@ -74,10 +74,11 @@ export class Fish {
 
   async recall({ query, requester = 'self', types, limit }) {
     const recs = await this.memory.retrieve({ query, requester, types, limit });
+    // 事件只记查询的字数，不记原文：聊天流程拿整条消息当查询，原文进事件表就会永久保存。
     await this.events.append({
       kind: 'memory.retrieved',
       platform: 'fish-os',
-      payload: { query, requester, count: recs.length },
+      payload: { queryChars: String(query ?? '').length, requester, count: recs.length },
       privacy: 'self',
     });
     return recs;

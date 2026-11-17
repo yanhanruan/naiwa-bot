@@ -56,7 +56,7 @@ export async function importLegacyData(db, data, { tenantId = 'default' } = {}) 
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT DO NOTHING RETURNING id`,
         [tenantId, r.id, ms(r.ts), r.type, r.content, r.summary ?? r.content, r.tags, r.peers,
-          clamp(r.importance, 0, 1), r.access, r.meta ?? {}, dedupeKey(r.content)],
+          clamp(r.importance, 0, 1), r.access, r.meta ?? {}, dedupeKey(r.content, r.peers ?? [])],
       );
       if (rows.length) { report.memories.imported += 1; continue; }
       const existing = await tx.query('SELECT 1 FROM memories WHERE id = $1', [r.id]);

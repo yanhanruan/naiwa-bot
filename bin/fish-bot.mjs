@@ -22,6 +22,7 @@ import { DeepSeekBrain } from '../src/model/brain.js';
 import { ModelUsageLedger } from '../src/model/usage-ledger.js';
 import { ConversationRateLimiter } from '../src/model/rate-limiter.js';
 import { MessageInbox } from '../src/runtime/inbox.js';
+import { ConversationHistory } from '../src/context/history.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { loggerFromEnv } from '../src/log.js';
 
@@ -93,18 +94,31 @@ function record(ev) {
 const inbox = new MessageInbox({ db, tenantId: fish.tenantId });
 const interrupted = await inbox.recoverInterrupted();
 if (interrupted) log.warn('runtime.recovered', { msg: '上次退出时有消息没处理完，已标为中断', count: interrupted });
-async function pruneInbox() {
+// 短期对话历史存在数据库里（见 docs/module-06-context.md），超过 7 天的每天清理一次。
+const history = new ConversationHistory({ db, tenantId: fish.tenantId });
+// 两项分开清理：一项失败不能拖累另一项（对话历史含聊天原文，必须按期删除）。
+async function prune() {
   try {
     const removed = await inbox.prune();
     if (removed) log.info('runtime.pruned', { msg: '已清理 30 天前的消息记录', count: removed });
   } catch (error) {
     log.error('runtime.prune_failed', { msg: '清理消息记录失败', error });
   }
+  try {
+    const turns = await history.prune();
+    if (turns) log.info('context.pruned', { msg: '已清理 7 天前的对话历史', count: turns });
+  } catch (error) {
+    log.error('context.prune_failed', { msg: '清理对话历史失败', error });
+  }
 }
-await pruneInbox();
-setInterval(() => void pruneInbox(), 24 * 3_600_000).unref();
+await prune();
+setInterval(() => void prune(), 24 * 3_600_000).unref();
+// 重启前奶蛙发过的消息：有人引用它们时仍算“叫到了奶蛙”。
+const sentMessageKeys = await inbox.recentSentMessages();
 
-const handleEvent = createQQHandler({ fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox });
+const handleEvent = createQQHandler({
+  fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, sentMessageKeys,
+});
 // 一个长期存在的客户端：断线重连、请求超时、无响应探测、发送节流都在客户端内部完成。
 const client = new OneBotClient({
   url: ws,

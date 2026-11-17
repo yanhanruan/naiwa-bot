@@ -24,9 +24,9 @@
  */
 
 /**
- * 会话内代号簿：按首次出现顺序把用户 key 映射成 u1、u2…。
+ * 进程内的代号簿：按首次出现顺序把用户 key 映射成 u1、u2…，重启后重新编号。
  * 模型只看到代号，看不到 QQ 号或内部 key，避免在回复里复述号码；真实 key 只留在程序内部。
- * 代号与短期历史一样只在进程内有效，重启后重新编号。
+ * 处理器从 Module 6 起改用全局、持久的代号（src/context/aliases.js）；这里保留给不连数据库的场合和测试。
  * @returns {(userKey: string) => string}
  */
 export function createAliasBook() {

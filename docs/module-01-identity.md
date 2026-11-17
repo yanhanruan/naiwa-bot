@@ -71,7 +71,7 @@
 `bin/fish-bot.mjs` 负责加载配置、建立连接；原聊天流程提取到 `src/qq-handler.js`，可注入模拟模型和发送端进行测试。
 
 1. 原始 OneBot 事件通过 `normalizeOneBotMessage()` 归一化。
-2. 历史按 `conversation.key` 查找。每条发给模型的用户消息只包含发言者代号、昵称、本会话内的消息 ID 与有序消息段。**模型看不到 QQ 号或任何内部 key**：每个会话有一本代号簿（`createAliasBook()`），按首次出现顺序把 `sender.key` / `mention.userKey` 换成 `u1`、`u2`…；@ 当前机器人账号的段写成 `{ type: 'mention', toYou: true }`，不需要模型比对号码。系统提示只说明是群聊还是私聊。代号簿与短期历史一样只在进程内有效，重启后重新编号。
+2. 历史按 `conversation.key` 查找。每条发给模型的用户消息只包含发言者代号、昵称、本会话内的消息 ID 与有序消息段。**模型看不到 QQ 号或任何内部 key**：每个会话有一本代号簿（`createAliasBook()`），按首次出现顺序把 `sender.key` / `mention.userKey` 换成 `u1`、`u2`…；@ 当前机器人账号的段写成 `{ type: 'mention', toYou: true }`，不需要模型比对号码。系统提示只说明是群聊还是私聊。代号簿与短期历史一样只在进程内有效，重启后重新编号。（Module 6 起改为全局、持久的代号：同一个人在任何群和私聊里代号都一样；短期历史也存进了数据库，见 [Module 6 导读](module-06-context.md)。）
 3. 关系按 `sender.key` 记录。群名片不会覆盖用户关系中的全局昵称。
 4. 新增情节记忆在 `meta` 中携带账号、用户、会话和消息 key；正文只写昵称，不写 key（正文会进入模型提示），召回时按 `meta.senderKey` 换成本会话代号显示，例如 `- [episodic · u1] 小甲说「…」→ 我「…」`。可见性为 `conversation:<conversation.key>`：只在发生的那个会话里召回，群里的事不进私聊，私聊也不进群。`conversation:` 是“只在这个会话可见”，与“属于某个人”的 `private:` 是不同语义，不复用。记忆去重同时比较类型、可见范围 `access` 和规范化正文：相同内容可以分别属于不同会话，同一范围内仍沿用原有内容去重规则。
 5. 按会话类型发送，协议参数保留上游 ID 的原始类型，避免只因内部统一为字符串就改变出站参数。

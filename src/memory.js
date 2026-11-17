@@ -1,14 +1,19 @@
 import { randomUUID } from 'node:crypto';
-import { MEMORY_TYPES, clamp, clamp01, validateMemoryRecord } from './schema.js';
+import { MEMORY_TYPES, OPERATOR, clamp, clamp01, validateMemoryRecord } from './schema.js';
 
 function normalize(s) {
   return String(s).replace(/\s+/g, '').toLowerCase();
 }
 
-// 去重键：太短的内容（如“好”“哈哈”）不去重。
-export function dedupeKey(content) {
+// 去重键：规范化正文，加上涉及的人（peers 去重、排序后用 \x1f 连接）。
+// 同一可见范围里，同一个人的相同内容只存一条；不同的人说了相同的话，各存各的。
+// 太短的内容（如“好”“哈哈”）不去重。迁移 004 按同样的规则重算了已有记录的去重键。
+const PEER_SEPARATOR = '\u001f';
+export function dedupeKey(content, peers = []) {
   const n = normalize(content);
-  return n.length < 6 ? null : n;
+  if (n.length < 6) return null;
+  const sortedPeers = [...new Set(peers)].sort();
+  return sortedPeers.length ? `${n}${PEER_SEPARATOR}${sortedPeers.join(PEER_SEPARATOR)}` : n;
 }
 
 // 朴素摘要（截断）。生产环境可替换为 LLM 摘要器，接口保持一致。
@@ -57,11 +62,14 @@ function fromRow(row) {
 // 可见性的 SQL 版本，必须与 schema.js 的 visibleTo 保持一致。n 是 requester 参数的序号。
 function visibleSql(n) {
   const r = `$${n}::text`;
-  return `(${r} = 'self'
+  return `(${r} = '${OPERATOR}'
     OR access = 'public'
-    OR access = 'private:' || ${r}
-    OR access = 'conversation:' || ${r}
-    OR (access LIKE 'group:%' AND ${r} = ANY(peers)))`;
+    OR (${r} = 'self' AND access = 'self')
+    OR (${r} <> 'self' AND (
+      access = 'private:' || ${r}
+      OR access = 'conversation:' || ${r}
+      OR access = 'person:' || ${r}
+      OR (access LIKE 'group:%' AND ${r} = ANY(peers)))))`;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -97,7 +105,7 @@ export class MemoryService {
        ON CONFLICT (tenant_id, type, access, dedupe_key) DO NOTHING
        RETURNING id`,
       [this.tenantId, rec.id, new Date(rec.ts), rec.type, rec.content, rec.summary, rec.tags, rec.peers,
-        rec.importance, rec.access, rec.meta, dedupeKey(rec.content)],
+        rec.importance, rec.access, rec.meta, dedupeKey(rec.content, rec.peers)],
     );
     if (rows.length === 0) return { added: false, reason: 'duplicate' };
     return { added: true, record: rec };
@@ -142,7 +150,7 @@ export class MemoryService {
     return rows.map(fromRow);
   }
 
-  // requester === 'self' 时删除全部；否则只删除对其可见的部分（隐私隔离）。
+  // requester 为 OPERATOR（运维）时删除全部；否则只删除对其可见的部分（隐私隔离）。
   async deleteAll(requester = 'self') {
     const { rows } = await this.db.query(
       `WITH d AS (DELETE FROM memories WHERE tenant_id = $1 AND ${visibleSql(2)} RETURNING 1)

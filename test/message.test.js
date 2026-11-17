@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import {
   Fish, scope, visibleTo, entityKey, conversationKey, normalizeOneBotMessage, messageForModel, createAliasBook, OneBotError,
-  ModelError, MessageInbox, MemoryInbox, RUNTIME_DEFAULTS,
+  ModelError, MessageInbox, MemoryInbox, RUNTIME_DEFAULTS, OPERATOR,
 } from '../src/index.js';
 import { createQQHandler, NOTICES } from '../src/qq-handler.js';
 import { openFish, testDb, closeTestDb, captureLogger, waitFor } from './helpers.js';
@@ -211,7 +211,7 @@ test('真实入口函数：群聊保留每轮发言者，关系属于个人', as
   assert.ok(h.requests[1][0].content.includes('## 当前会话\n群聊'));
   assert.deepEqual((await h.fish.character.state()).relationships.map((r) => r.peerId), ['qq:user:101', 'qq:user:102']);
   assert.equal((await h.fish.character.getRelationship('qq:user:101')).name, '小甲');
-  const stored = await h.fish.memory.export();
+  const stored = await h.fish.memory.export({ requester: OPERATOR });
   assert.equal(stored[1].meta.senderKey, 'qq:user:102');
   assert.equal(stored[1].meta.messageKey, 'qq:account:900:conversation:group:200:message:2');
 });
@@ -454,6 +454,75 @@ test('退出时：停止接收新消息，等手上的处理完再返回', async
   assert.equal(h.logs.find('message.ignored').filter((e) => e.reason === 'shutting_down').length, 1);
 });
 
+// 取系统提示里的某一节（各节之间用空行分隔）。
+const promptSection = (request, title) => request[0].content.split('\n\n').find((s) => s.startsWith(`## ${title}`));
+
+test('重启后记得之前的对话：短期历史和代号都存在数据库里', async (t) => {
+  const h = await setup(t);
+  await h.handle(event({ message_id: 1, message: '我叫小甲' }));
+  const restarted = h.another(); // 新的处理器：内存里什么都没有，只有同一个数据库
+  await restarted(event({ message_id: 2, message: '我叫什么' }));
+  const turns = h.requests[1].filter((m) => m.role !== 'system');
+  assert.deepEqual(turns.map((m) => m.role), ['user', 'assistant', 'user']);
+  assert.equal(JSON.parse(turns[0].content).segments[0].text, '我叫小甲');
+  assert.equal(turns[1].content, '收到');
+  assert.deepEqual(userMessages(h.requests[1]).map((m) => m.sender.alias), ['u1', 'u1']);
+});
+
+test('跨会话认人：同一个人在群 A、群 B 代号一致，印象按所有群合计；群 A 的具体事不会在群 B 召回', async (t) => {
+  const h = await setup(t);
+  await h.handle(event({ group_id: 200, message_id: 1, message: '我在群A说的暗号是蓝色海豚' }));
+  await h.handle(event({ group_id: 201, message_id: 1, message: '我来群B了' }));
+  await h.handle(event({ group_id: 200, message_id: 2, message: '我又回群A了' }));
+  const [a1, b, a2] = h.requests;
+  assert.equal(userMessages(b).at(-1).sender.alias, userMessages(a1).at(-1).sender.alias);
+  assert.match(promptSection(a1, '当前发言者'), /这是你们第一次在群里说话/);
+  assert.match(promptSection(b, '当前发言者'), /你们在群里聊过 1 次/, '第一次来群 B，也认得出在群 A 聊过');
+  assert.match(promptSection(a2, '当前发言者'), /你们在群里聊过 2 次/);
+  assert.ok(!JSON.stringify(b).includes('蓝色海豚'), '群 A 的具体事不应出现在群 B');
+});
+
+test('私聊内容永远不进群：历史、记忆、印象里都没有，群里也看不出私聊过几次（重启后也一样）', async (t) => {
+  const h = await setup(t);
+  for (let i = 1; i <= 3; i += 1) {
+    await h.handle(event({ message_type: 'private', sub_type: 'friend', message_id: i, message: `私聊秘密${i}：暗号是红色鲸鱼` }));
+  }
+  const restarted = h.another();
+  await restarted(event({ message_id: 9, message: '大家好' }));
+  const group = h.requests.at(-1);
+  for (const secret of ['红色鲸鱼', '私聊秘密']) assert.ok(!JSON.stringify(group).includes(secret), secret);
+  assert.match(promptSection(group, '当前发言者'), /这是你们第一次在群里说话/);
+  // 回到私聊：印象按全部互动算（3 次私聊 + 1 次群聊）
+  await restarted(event({ message_type: 'private', sub_type: 'friend', message_id: 10, message: '又来私聊了' }));
+  assert.match(promptSection(h.requests.at(-1), '当前发言者'), /你们聊过 4 次/);
+});
+
+test('相同内容可以属于不同的人：两个人在同一个群说了一样的话，各存一条；同一个人重复仍去重', async (t) => {
+  const h = await setup(t);
+  const same = { sender: { nickname: '小明', card: '小明' }, message: '我想买一只猫' };
+  await h.handle(event({ ...same, user_id: 101, message_id: 1 }));
+  await h.handle(event({ ...same, user_id: 102, message_id: 2 }));
+  const records = await h.fish.memory.export({ requester: OPERATOR });
+  assert.equal(records.length, 2);
+  assert.equal(new Set(records.map((r) => r.content)).size, 1, '两条内容完全相同');
+  assert.deepEqual(records.map((r) => r.peers[0]).sort(), ['qq:user:101', 'qq:user:102']);
+  await h.handle(event({ ...same, user_id: 101, message_id: 3 }));
+  assert.equal((await h.fish.memory.export({ requester: OPERATOR })).length, 2);
+});
+
+test('重启后，有人引用奶蛙以前发的消息也算叫到它；消息记录能交出这些消息', async (t) => {
+  const inbox = new MessageInbox({ db: await testDb(), tenantId: `test-${randomUUID()}` });
+  const h = await setup(t, { inbox });
+  await h.handle(event({ message_id: 1 })); // 奶蛙回复，发出的消息编号是 9001
+  const sentMessageKeys = await inbox.recentSentMessages();
+  assert.deepEqual(sentMessageKeys, ['qq:account:900:conversation:group:200:message:9001']);
+  const restarted = h.another({ replyToAllGroupMessages: false, sentMessageKeys });
+  await restarted(event({ message_id: 5, message: '[CQ:reply,id=9001]你说得对' }));
+  assert.equal(h.requests.length, 2, '引用了奶蛙重启前发的消息，应该回复');
+  await restarted(event({ message_id: 6, message: '[CQ:reply,id=9999]这条引用的不是奶蛙' }));
+  assert.equal(h.requests.length, 2);
+});
+
 test('花费上限：每次被叫到都回固定提示；会话限速：每段受限时间只提示一次；都不记录，也不算错误', async (t) => {
   const h = await setup(t);
   h.brain.chat = async () => { throw new ModelError('BUDGET_EXCEEDED'); };
@@ -509,7 +578,7 @@ test('相同聊天内容在不同群、私聊和机器人账号下分别保存�
   ].map((input) => ({ ...input, sender: { nickname: '小甲' }, message: '我喜欢鲸鱼' }));
   for (const input of inputs) await h.handle(input);
   assert.equal(await h.fish.memory.count(), 4);
-  assert.equal(new Set((await h.fish.memory.export()).map((r) => r.content)).size, 1);
+  assert.equal(new Set((await h.fish.memory.export({ requester: OPERATOR })).map((r) => r.content)).size, 1);
 
   // 同一可见范围内的相同内容仍应去重，不通过完全关闭去重掩盖问题。
   await h.handle({ ...inputs[0], message_id: 14 });
@@ -555,14 +624,14 @@ test('模型请求中不出现原始 QQ 号或内部 key；代号在会话内稳
   ]);
   // 记忆按会话内代号标注发言者；内部仍保存真实 key 供程序使用。
   assert.match(h.requests[2][0].content, /- \[episodic · u1\] 甲说「鲸鱼好大」/);
-  assert.equal((await h.fish.memory.export())[0].meta.senderKey, 'qq:user:55501');
+  assert.equal((await h.fish.memory.export({ requester: OPERATOR }))[0].meta.senderKey, 'qq:user:55501');
   assert.deepEqual(userMessages(h.requests[3]).map((m) => m.sender.alias), ['u1']);
 });
 
 test('会话记忆使用 conversation 范围：只对该会话可见，不对个人或其他会话可见', async (t) => {
   const h = await setup(t);
   await h.handle(event());
-  const [record] = await h.fish.memory.export();
+  const [record] = await h.fish.memory.export({ requester: OPERATOR });
   const conversation = 'qq:account:900:conversation:group:200';
   assert.equal(record.access, `conversation:${conversation}`);
   assert.equal(scope.conversation(conversation), record.access);

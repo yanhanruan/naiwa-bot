@@ -1,6 +1,8 @@
 #!/usr/bin/env node
-import { Fish } from '../src/index.js';
+import { Fish, OPERATOR } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
+
+// CLI 是运维工具：查看、导出、删除记忆时以运维身份（OPERATOR）操作，能看到全部记录。
 
 async function readStdin() {
   const chunks = [];
@@ -42,16 +44,16 @@ async function run(fish, cmd, args) {
       break;
     }
     case 'recall':
-      out(await fish.recall({ query: args.join(' ') || '', requester: 'self' }));
+      out(await fish.recall({ query: args.join(' ') || '', requester: OPERATOR }));
       break;
     case 'export':
-      out(await fish.memory.export({ requester: 'self' }));
+      out(await fish.memory.export({ requester: OPERATOR }));
       break;
     case 'forget':
-      out(await fish.memory.forget(args[0]));
+      out(await fish.memory.forget(args[0], OPERATOR));
       break;
     case 'delete':
-      out(await fish.memory.deleteAll('self'));
+      out(await fish.memory.deleteAll(OPERATOR));
       break;
     case 'act':
       out(await fish.bridge.act({ type: args[0] ?? 'publish', platform: 'fish-os', text: args.slice(1).join(' ') }));

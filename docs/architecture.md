@@ -69,7 +69,7 @@ flowchart TD
 
 1. 你在 QQ 发一句 → QQ 服务器 → SnowLuma 里的 QQ 客户端；
 2. SnowLuma Hook 捕获 → 转成 OneBot v11 事件 → WS `:3001` 推给 fish-bot；
-3. fish-bot 先去重（同一条消息只处理一次），再放进这个会话的队列：同一会话逐条处理，前一条回复完才处理下一条；轮到时检索该 peer 可见的记忆 + 拼 system prompt（人设/准则/记忆/时间/历史）；
+3. fish-bot 先去重（同一条消息只处理一次），再放进这个会话的队列：同一会话逐条处理，前一条回复完才处理下一条；轮到时检索这个会话可见的记忆、对发言者的印象、24 小时内的短期历史（都在数据库里），用全局代号拼 system prompt（人设/准则/当前发言者/记忆/时间）；
 4. 先检查今天的花费是否已达上限、这个会话是否调用太频繁，再调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成），用量按官方价格估算后入账；
 5. 拿到回复 → 进入发送节流队列 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
 6. 失败降级：第一次失败（超时、限流、服务端错误、空回复）就换“不搜索、不思考”再试一次，60 秒内必有结果；仍然失败时只发固定提示，不把错误原文发给用户。
@@ -110,6 +110,22 @@ fish-bot 与 SnowLuma 之间只有一条正向 WebSocket 连接，由 `src/adapt
 
 详见 [Module 5 导读](module-05-runtime.md)。
 
+## 上下文与长期记忆
+
+记忆分三层（保守策略），见 `src/context/`、`src/schema.js`：
+
+| 层次 | 可见范围 |
+| --- | --- |
+| 对这个人的印象（昵称、熟不熟、`person:` 备注） | 跟着人走：任何群和私聊都放进提示；群里只按群聊互动算 |
+| 会话里发生的具体事（情节记忆） | 只在原会话 |
+| 私聊内容（历史、情节记忆） | 只在该私聊，永远不进任何群 |
+
+- 每个人一个全局、持久的代号（u1、u2…），任何会话里都一样；
+- 短期历史存在数据库里，重启不丢，只取 24 小时内的最近 3 轮；
+- `self` 只能看自我记忆和公开记忆，运维工具用 `OPERATOR` 看全部。
+
+详见 [Module 6 导读](module-06-context.md)。
+
 ## 存储
 
 PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结构见 `migrations/`：
@@ -123,5 +139,7 @@ PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结�
 | `relationships` | 每个人的关系：互动次数、好感度、备注 |
 | `model_usage` | 模型用量账本：按北京时间的日期、会话、模型累计调用次数、token、搜索次数和估算花费（不存内容） |
 | `inbound_messages` | 入站消息记录：每条叫到奶蛙的消息的处理状态和结果，用于去重（不存内容，保留 30 天） |
+| `person_aliases` / `person_alias_counters` | 全局、持久的代号：每个人一个 u 编号 |
+| `conversation_turns` | 短期对话历史：每个会话最近几轮发给模型的消息（含聊天原文，保留 7 天） |
 
 所有表带 `tenant_id`（目前只有 `default`）。详见 [Module 2 导读](module-02-storage.md)。

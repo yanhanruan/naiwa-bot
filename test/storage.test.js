@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { Fish, scope } from '../src/index.js';
+import { Fish, scope, OPERATOR, visibleTo } from '../src/index.js';
 import { connectPGlite, migrate, openStorage } from '../src/storage/index.js';
 import { testDb, closeTestDb } from './helpers.js';
 
@@ -95,12 +95,20 @@ for (const { name, open } of backends) {
     await f.remember({ type: 'episodic', content: '某个群会话的记忆', access: scope.conversation(conv) });
     await f.remember({ type: 'episodic', content: '群里甲参与的记忆', access: scope.group('g1'), peers: ['甲'] });
     await f.remember({ type: 'episodic', content: '角色自己的记忆哦', access: scope.SELF });
+    await f.remember({ type: 'relational', content: '对甲的印象：喜欢鲸鱼', access: scope.person('甲'), peers: ['甲'] });
     const seen = async (requester) => (await f.recall({ requester, limit: 99 })).map((r) => r.content).sort();
-    assert.deepEqual(await seen('甲'), ['公开的记忆内容', '甲的私有记忆内容', '群里甲参与的记忆'].sort());
+    assert.deepEqual(await seen('甲'), ['公开的记忆内容', '甲的私有记忆内容', '群里甲参与的记忆', '对甲的印象：喜欢鲸鱼'].sort());
     assert.deepEqual(await seen('乙'), ['公开的记忆内容']);
     assert.deepEqual(await seen(conv), ['公开的记忆内容', '某个群会话的记忆'].sort());
-    assert.equal((await seen('self')).length, 5);
-    const [secret] = (await f.memory.export()).filter((r) => r.access === scope.private('甲'));
+    // self 不再能看全部：只看自我记忆和公开记忆。运维身份才能看全部。
+    assert.deepEqual(await seen('self'), ['公开的记忆内容', '角色自己的记忆哦'].sort());
+    assert.equal((await seen(OPERATOR)).length, 6);
+    // SQL 的可见性必须与 JS 的 visibleTo 逐条一致。
+    const all = await f.memory.export({ requester: OPERATOR });
+    for (const requester of ['甲', '乙', conv, 'self', OPERATOR]) {
+      assert.deepEqual(await seen(requester), all.filter((r) => visibleTo(r, requester)).map((r) => r.content).sort(), requester);
+    }
+    const [secret] = all.filter((r) => r.access === scope.private('甲'));
     assert.deepEqual(await f.memory.forget(secret.id, '乙'), { ok: false, reason: 'forbidden' });
     assert.deepEqual(await f.memory.forget('not-a-uuid'), { ok: false, reason: 'not-found' });
   });
@@ -110,7 +118,7 @@ test('迁移可重复执行；失败的迁移整体回滚', async () => {
   const db = await connectPGlite();
   try {
     // 新增迁移文件时更新这里的列表。
-    const all = ['001_init.sql', '002_model_usage.sql', '003_inbound_messages.sql'];
+    const all = ['001_init.sql', '002_model_usage.sql', '003_inbound_messages.sql', '004_context.sql'];
     assert.deepEqual(await migrate(db), all);
     assert.deepEqual(await migrate(db), []);
 

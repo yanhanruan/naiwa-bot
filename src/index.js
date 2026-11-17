@@ -17,6 +17,9 @@ export { PRICES_CNY, estimateCostCny, isPeak, beijingDate } from './model/pricin
 export { ConversationQueue, QueueError } from './runtime/conversation-queue.js';
 export { MessageInbox, MemoryInbox, MESSAGE_STATUSES } from './runtime/inbox.js';
 export { createQQHandler, RUNTIME_DEFAULTS, NOTICES } from './qq-handler.js';
+export { PersonAliases } from './context/aliases.js';
+export { ConversationHistory, HISTORY_DEFAULTS } from './context/history.js';
+export { PersonImpressions } from './context/impressions.js';
 export * from './schema.js';
 export * from './identity.js';
 export { normalizeOneBotMessage } from './adapters/onebot-message.js';

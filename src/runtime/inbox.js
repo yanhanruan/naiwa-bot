@@ -13,6 +13,8 @@
 //   skipped     收到时已经太旧，没有处理
 //   abandoned   处理到一半时进程退出或重启
 
+import { messageKey } from '../identity.js';
+
 export const MESSAGE_STATUSES = ['queued', 'processing', 'replied', 'notice', 'silent', 'send_failed', 'dropped', 'skipped', 'abandoned'];
 const DAY_MS = 24 * 3_600_000;
 
@@ -80,6 +82,19 @@ export class MessageInbox {
     return rows.length;
   }
 
+  // 最近发出的消息（按时间顺序），用于重启后仍能识别“有人引用了奶蛙发过的消息”。
+  // 返回奶蛙发出的那条消息的 key（会话 key + 发出的消息编号）。
+  async recentSentMessages({ withinMs = 7 * DAY_MS, limit = 2000 } = {}) {
+    const { rows } = await this.db.query(
+      `SELECT conversation_key, sent_message_id FROM inbound_messages
+        WHERE tenant_id = $1 AND sent_message_id IS NOT NULL
+          AND received_at > now() - ($2::double precision * interval '1 millisecond')
+        ORDER BY received_at DESC LIMIT $3`,
+      [this.tenantId, withinMs, limit],
+    );
+    return rows.reverse().map((row) => messageKey(row.conversation_key, row.sent_message_id));
+  }
+
   // 查一条消息的记录（排查问题、测试用）。
   async get(messageKey) {
     const { rows } = await this.db.query(
@@ -139,6 +154,12 @@ export class MemoryInbox {
 
   async prune() {
     return 0;
+  }
+
+  async recentSentMessages() {
+    return [...this.entries.values()]
+      .filter((entry) => entry.sentMessageId !== undefined)
+      .map((entry) => messageKey(entry.conversationKey, entry.sentMessageId));
   }
 
   async get(messageKey) {

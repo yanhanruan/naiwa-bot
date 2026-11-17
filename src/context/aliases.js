@@ -1,0 +1,64 @@
+// 全局、持久的代号：每个人（用户 key）在一个租户里只有一个代号 u1、u2…，任何群和私聊里都一样，重启不变。
+// 模型只看到代号，看不到 QQ 号或内部 key；同一个代号在不同会话里出现，模型就知道是同一个人。
+// 代号按第一次出现的顺序分配，分配后不会再变，所以可以放心缓存在进程里。
+export class PersonAliases {
+  constructor({ db, tenantId = 'default' } = {}) {
+    if (!db) throw new Error('PersonAliases 需要 db（见 src/storage 的 openStorage）');
+    this.db = db;
+    this.tenantId = tenantId;
+    this.cache = new Map(); // personKey -> 'u12'
+  }
+
+  /**
+   * 取一批人的代号，没有的按传入顺序分配。返回 Map(personKey -> 代号)。
+   * @param {Array<string|null|undefined>} keys 空值会被忽略
+   */
+  async resolve(keys) {
+    const wanted = [...new Set(keys.filter(Boolean))];
+    const missing = wanted.filter((key) => !this.cache.has(key));
+    if (missing.length) {
+      const { rows } = await this.db.query(
+        'SELECT person_key, alias_no FROM person_aliases WHERE tenant_id = $1 AND person_key = ANY($2::text[])',
+        [this.tenantId, missing],
+      );
+      for (const row of rows) this.cache.set(row.person_key, `u${row.alias_no}`);
+      const unassigned = missing.filter((key) => !this.cache.has(key));
+      if (unassigned.length) await this._assign(unassigned);
+    }
+    return new Map(wanted.map((key) => [key, this.cache.get(key)]));
+  }
+
+  // 先锁住这个租户的计数器，再检查、分配：另一个进程刚分配过的代号这时一定看得到，不会重号。
+  async _assign(keys) {
+    const assigned = await this.db.transaction(async (tx) => {
+      await tx.query(
+        'INSERT INTO person_alias_counters (tenant_id, last_no) VALUES ($1, 0) ON CONFLICT (tenant_id) DO NOTHING',
+        [this.tenantId],
+      );
+      const { rows: [counter] } = await tx.query(
+        'SELECT last_no FROM person_alias_counters WHERE tenant_id = $1 FOR UPDATE',
+        [this.tenantId],
+      );
+      const { rows: existing } = await tx.query(
+        'SELECT person_key, alias_no FROM person_aliases WHERE tenant_id = $1 AND person_key = ANY($2::text[])',
+        [this.tenantId, keys],
+      );
+      const result = new Map(existing.map((row) => [row.person_key, row.alias_no]));
+      let lastNo = counter.last_no;
+      for (const key of keys) {
+        if (result.has(key)) continue;
+        lastNo += 1;
+        await tx.query(
+          'INSERT INTO person_aliases (tenant_id, person_key, alias_no) VALUES ($1, $2, $3)',
+          [this.tenantId, key, lastNo],
+        );
+        result.set(key, lastNo);
+      }
+      if (lastNo !== counter.last_no) {
+        await tx.query('UPDATE person_alias_counters SET last_no = $2 WHERE tenant_id = $1', [this.tenantId, lastNo]);
+      }
+      return result;
+    });
+    for (const [key, no] of assigned) this.cache.set(key, `u${no}`);
+  }
+}
