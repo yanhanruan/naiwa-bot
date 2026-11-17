@@ -103,6 +103,34 @@ for (const { name, open } of backends) {
   });
 }
 
+test('迁移 005：抹掉历史检索事件里的查询原文，只留字数；其他事件不动', async () => {
+  const migrations = fileURLToPath(new URL('../migrations/', import.meta.url));
+  const dir = mkdtempSync(join(tmpdir(), 'naiwa-m005-'));
+  const db = await connectPGlite();
+  try {
+    for (const file of readdirSync(migrations).filter((f) => f < '005')) cpSync(join(migrations, file), join(dir, file));
+    await migrate(db, { dir });
+    const insert = (kind, payload) => db.query(
+      `INSERT INTO events (id, tenant_id, ts, platform, kind, payload, privacy) VALUES ($1, 't', now(), 'fish-os', $2, $3, 'self')`,
+      [randomUUID(), kind, payload],
+    );
+    await insert('memory.retrieved', { query: '我的暗号是红色鲸鱼', requester: 'conv', count: 2 });
+    await insert('memory.retrieved', { queryChars: 3, requester: 'conv', count: 0 }); // 新写法，不受影响
+    await insert('memory.added', { query: '不是检索事件，不动' });
+    cpSync(join(migrations, '005_scrub_recall_queries.sql'), join(dir, '005_scrub_recall_queries.sql'));
+    assert.deepEqual(await migrate(db, { dir }), ['005_scrub_recall_queries.sql']);
+    const { rows } = await db.query('SELECT kind, payload FROM events ORDER BY kind, payload::text');
+    assert.deepEqual(rows.map((r) => r.payload), [
+      { query: '不是检索事件，不动' },
+      { queryChars: 3, requester: 'conv', count: 0 },
+      { queryChars: 9, requester: 'conv', count: 2 },
+    ]);
+  } finally {
+    await db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('去重键带上“是谁”：不同的人说了相同的内容各存各的；迁移 004 按同样的规则重算旧记录', async () => {
   assert.notEqual(dedupeKey('我喜欢鲸鱼呀', ['qq:user:1']), dedupeKey('我喜欢鲸鱼呀', ['qq:user:2']));
   assert.equal(dedupeKey('我喜欢鲸鱼呀', ['b', 'a', 'a']), dedupeKey('我 喜欢鲸鱼呀', ['a', 'b']));

@@ -118,7 +118,7 @@ test('迁移可重复执行；失败的迁移整体回滚', async () => {
   const db = await connectPGlite();
   try {
     // 新增迁移文件时更新这里的列表。
-    const all = ['001_init.sql', '002_model_usage.sql', '003_inbound_messages.sql', '004_context.sql'];
+    const all = ['001_init.sql', '002_model_usage.sql', '003_inbound_messages.sql', '004_context.sql', '005_scrub_recall_queries.sql'];
     assert.deepEqual(await migrate(db), all);
     assert.deepEqual(await migrate(db), []);
 
