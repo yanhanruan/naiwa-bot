@@ -1,7 +1,8 @@
 // 短期对话历史：每个会话最近几条发给模型的消息，存在数据库里，重启后仍在。
 // - 只有确实发出的回复才写入（一问一答一起写），失败、提示语都不写。
 // - 读取时只取最近 maxEntries 条，而且只要 freshMs 以内的：隔天再来就当新对话，不拿昨天的半句话当上文。
-// - 超过 7 天的定期删除。长期记忆（memories）不受影响。
+// - 超过 7 天的定期删除。
+// - 写入和删除走 writer（持锁连接，见 src/storage/run-lock.js）：forget-person 删掉的原话，旧进程写不回来。读取走 db。
 const HOUR_MS = 3_600_000;
 
 export const HISTORY_DEFAULTS = {
@@ -11,9 +12,10 @@ export const HISTORY_DEFAULTS = {
 };
 
 export class ConversationHistory {
-  constructor({ db, tenantId = 'default', maxEntries = HISTORY_DEFAULTS.maxEntries, freshMs = HISTORY_DEFAULTS.freshMs } = {}) {
+  constructor({ db, writer = db, tenantId = 'default', maxEntries = HISTORY_DEFAULTS.maxEntries, freshMs = HISTORY_DEFAULTS.freshMs } = {}) {
     if (!db) throw new Error('ConversationHistory 需要 db（见 src/storage 的 openStorage）');
     this.db = db;
+    this.writer = writer;
     this.tenantId = tenantId;
     this.maxEntries = maxEntries;
     this.freshMs = freshMs;
@@ -46,7 +48,7 @@ export class ConversationHistory {
       values.push(`($1, $2, $${params.length - 1}, $${params.length}, $3)`);
     }
     // VALUES 按顺序插入，id 递增，读取时按 id 排序就是对话顺序。
-    await this.db.query(
+    await this.writer.query(
       `INSERT INTO conversation_turns (tenant_id, conversation_key, role, content, message_key) VALUES ${values.join(', ')}`,
       params,
     );
@@ -54,7 +56,7 @@ export class ConversationHistory {
 
   // 删除早于 olderThanMs 的历史（默认 7 天），返回条数。
   async prune(olderThanMs = HISTORY_DEFAULTS.keepMs) {
-    const { rows } = await this.db.query(
+    const { rows } = await this.writer.query(
       `DELETE FROM conversation_turns WHERE tenant_id = $1
          AND created_at < now() - ($2::double precision * interval '1 millisecond') RETURNING id`,
       [this.tenantId, olderThanMs],

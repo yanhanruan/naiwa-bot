@@ -1,12 +1,12 @@
 # Fish OS — 跨平台数字生命核心
 
-一条可运行、可验证、可继续扩展的数字生命原型。本包是**平台无关的核心**：人格引擎、长期记忆、事件存储、审批策略、主动调度、Character OS Bridge。平台传输层（QQ 等）通过适配器复用成熟组件接入。
+一条可运行、可验证、可继续扩展的数字生命原型。本包是**平台无关的核心**：人格引擎、记忆（带出处的事实）、事件存储、审批策略、主动调度、Character OS Bridge。平台传输层（QQ 等）通过适配器复用成熟组件接入。
 
 > **当前状态（2026-11）**：本仓库的 QQ bot 是「奶蛙」——SnowLuma(OneBot v11) + DeepSeek Responses API（服务端 web_search）。架构与消息流见 [docs/architecture.md](docs/architecture.md)。
 
 > 纯 ESM，Node ≥ 22.4（用到内置的 WebSocket）。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite）和本地假 OneBot 服务端，`npm test` 不需要启动任何服务。
 
-> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)；Module 5（消息处理运行时：同一会话逐条处理、去重、发送失败如实记录与补发）见 [Module 5 导读](docs/module-05-runtime.md)；Module 6（上下文与长期记忆：全局代号、重启不丢历史、跨会话认人、私聊不进群）见 [Module 6 导读](docs/module-06-context.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
+> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)；Module 5（消息处理运行时：同一会话逐条处理、去重、发送失败如实记录与补发）见 [Module 5 导读](docs/module-05-runtime.md)；Module 6（上下文与长期记忆：全局代号、重启不丢历史、跨会话认人、私聊不进群）见 [Module 6 导读](docs/module-06-context.md)；记忆重做（v2：后台提炼带出处的事实、按地方取用、按人删除）见 [记忆 v2 设计](docs/memory-v2-design.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
 
 ## 架构
 
@@ -14,12 +14,12 @@
                  ┌──────────────────────────────────────────┐
                  │                Fish（顶层编排）            │
                  ├──────────────────────────────────────────┤
- 平台适配器 ────▶ │ reactTo / remember / recall / touch / act │
+ 平台适配器 ────▶ │      reactTo / touch / act / 事实读取      │
   (QQ / B站/…)   ├───────────────┬───────────────────────────┤
                  │               │                           │
      ┌───────────▼──────┐  ┌─────▼──────┐  ┌───────────────┐
-     │ Character Core    │  │ Memory Svc  │  │ Event Store   │
-     │ 人格·情绪·兴趣·关系 │  │ 长期记忆    │  │ 统一事件格式   │
+     │ Character Core    │  │ Memory v2   │  │ Event Store   │
+     │ 人格·情绪·兴趣·关系 │  │ 带出处的事实 │  │ 统一事件格式   │
      └───────────┬──────┘  └────────────┘  └───────────────┘
                  │
      ┌───────────▼──────────┐  ┌──────────────┐  ┌────────────────┐
@@ -39,16 +39,15 @@ naiwa-bot/
 ├── persona/naiwa.md        # 奶蛙人设（当前）
 ├── persona/social-rules.md # 聊天行为准则（最高优先级）
 ├── src/
-│   ├── schema.js           # 统一事件/记忆/状态格式 + 隐私可见性
-│   ├── storage/            # PostgreSQL 连接、迁移执行器、旧 JSON 导入
+│   ├── schema.js           # 统一事件/状态格式
+│   ├── storage/            # PostgreSQL 连接、迁移执行器、运行锁（持锁写入连接）
 │   ├── eventstore.js       # 事件存储
-│   ├── memory.js           # 长期记忆服务
 │   ├── character.js        # 人格引擎
 │   ├── policy.js           # 审批策略
 │   ├── scheduler.js        # 主动调度
 │   ├── bridge.js           # Character OS Bridge
 │   ├── fish.js             # 顶层编排
-│   ├── qq-handler.js       # QQ 消息处理（召回记忆、调模型、发送、记录）
+│   ├── qq-handler.js       # QQ 消息处理（取事实、调模型、发送、记录）
 │   ├── log.js              # 结构化日志
 │   ├── model/
 │   │   ├── brain.js          # DeepSeek 调用（时限、重试、检查结果、入账、执行上限）
@@ -63,6 +62,12 @@ naiwa-bot/
 │   │   ├── aliases.js        # 全局、持久的代号（u1、u2…）
 │   │   ├── history.js        # 短期对话历史（存数据库，重启不丢）
 │   │   └── impressions.js    # 对人的印象（规则印象，跟着人走）
+│   ├── memory/               # 记忆 v2（见 docs/memory-v2-design.md）
+│   │   ├── facts.js          # 事实表：唯一读取入口 inView、写入规则、回复时挑选
+│   │   ├── extraction.js     # 提炼的提示词、解析、审核（纯函数）
+│   │   ├── extractor.js      # 后台提炼：安静后提炼、进度、失败处理
+│   │   ├── forget.js         # 按人删除
+│   │   └── place.js          # 会话 key → 地方 key
 │   ├── adapters/
 │   │   ├── onebot.js         # OneBot v11 客户端（重连、超时、假活探测）
 │   │   ├── send-throttle.js  # 发送节流
@@ -78,7 +83,7 @@ naiwa-bot/
 ├── scripts/
 │   ├── backup.sh           # pg_dump 备份
 │   ├── restore.sh          # pg_restore 恢复
-│   └── import-json.mjs     # 旧版 JSON 数据导入
+│   └── eval-memory.mjs     # 提炼效果评测（调用真模型）
 ├── Dockerfile              # Linux/Docker 镜像
 ├── docker-compose.yml      # PostgreSQL（db）+ 可选守护进程
 ├── docs/
@@ -97,20 +102,17 @@ npm install
 # 结构化状态（Character OS Bridge）
 node bin/fish.mjs status
 
-# 写入记忆
-node bin/fish.mjs remember episodic "第一次见面，用户说想养一条会聊天的小鱼"
-node bin/fish.mjs remember interest "喜欢聊海洋生物，尤其是鲸鱼"
+# 查看奶蛙记得的事（关于某人或出自某个群），含出处原话
+node bin/fish.mjs facts qq:user:101
+node bin/fish.mjs facts qq:group:200
+node bin/fish.mjs fact-forget <编号>
 
-# 检索记忆
-node bin/fish.mjs recall "鲸鱼"
+# 删除某人的数据：先停机器人；不加 --yes 只预览条数
+node bin/fish.mjs forget-person qq:user:101 --yes
 
 # B站只读内容获取（真实拉取，无写操作）
 node bin/fish.mjs browse bilibili popular 5
 node bin/fish.mjs browse bilibili search 鲸鱼 5
-
-# 导出 / 删除记忆
-node bin/fish.mjs export
-node bin/fish.mjs delete
 
 # 发起一次发布意图（默认需审批）
 node bin/fish.mjs act publish "想去 B 站发一条动态"
@@ -126,7 +128,7 @@ node bin/fish.mjs proactive-on   # / proactive-off
 ## API
 
 ```js
-import { Fish, scope } from './src/index.js';
+import { Fish } from './src/index.js';
 
 import { openStorage } from './src/storage/index.js';
 
@@ -135,9 +137,6 @@ const fish = await (await Fish.open({ db, name: '奶蛙', persona: { core: '...'
 
 // 涉及存储的方法都是异步的
 await fish.reactTo({ platform: 'qq', kind: 'message.received', actor: 'peerA', payload: { text: 'hi', sentiment: 'positive' } });
-await fish.remember({ type: 'episodic', content: '...', access: 'public', tags: ['x'] });
-await fish.remember({ type: 'episodic', content: 'A 的私事', access: scope.private('A'), peers: ['A'] });
-await fish.recall({ query: '...', requester: 'A' });   // 自动按隐私隔离
 await fish.touch('peerA', { name: '小明', deltaSentiment: 0.2 });
 await fish.bridge.act({ type: 'publish', platform: 'bilibili', target: '评论', text: '...' });
 await fish.bridge.getStatus();   // 结构化状态
@@ -148,12 +147,14 @@ await db.close();
 
 每条事件：`{ id, ts, platform, kind, actor, target, payload, privacy, meta }`。所有平台入站消息先转成该格式再进入核心，保证跨平台一致。
 
-## 记忆类型与隐私
+## 记忆与隐私
 
-- 类型：`episodic`（情节）/ `semantic`（语义）/ `relational`（关系）/ `interest`（兴趣）/ `self`（自我）
-- 可见性：`self` / `public` / `private:<peerId>` / `group:<groupId>` / `conversation:<会话key>`（只在该会话可见，QQ 情节记忆使用）
-- 支持：检索（重要性+新鲜度+关键词打分）、摘要、去重、遗忘、导出、删除
-- **隐私隔离**：`retrieve(requester)` 只返回对该请求者可见的记忆，用户之间互不泄露
+见 [记忆 v2 设计](docs/memory-v2-design.md)：
+
+- 聊天原话（`conversation_turns`）谁也不改，7 天后删除；
+- 后台用便宜模型从原话里提炼短事实，分 4 个项目（称呼、个人情况、近况、群事），每条带出处原话；程序审核：出处必须是本人的话，奶蛙的话不能当出处；
+- 回复时只经 `FactStore.inView(地方, 涉及的人)` 读：这个群或私聊的事实，加上涉及的人在群里说的称呼。私聊来的事实永远不进群；
+- 到期自动删除（称呼、个人情况 1 年，近况 14 天，群事 30 天，从说出时算起）；运维可以查看、删单条、按人删除。
 
 ## 审批策略
 
@@ -167,9 +168,11 @@ await db.close();
 npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 ```
 
-覆盖验收项：① 连续人格稳定 + 情绪变化 ② 重启恢复记忆 ⑤ 统一事件结构 ⑥ 未经批准不发布/私信 ⑦ 记忆导出删除 ⑧ Bridge 结构化状态，外加隐私隔离、去重、关系记忆、主动开关，以及存储层的并发写入、租户隔离、迁移回滚和旧数据导入。
+覆盖验收项：① 连续人格稳定 + 情绪变化 ② 重启恢复角色状态 ⑤ 统一事件结构 ⑥ 未经批准不发布/私信 ⑧ Bridge 结构化状态，外加关系记忆、主动开关，以及存储层的并发写入、租户隔离和迁移回滚。
 
-设置 `TEST_DATABASE_URL`（指向一个**专用的测试数据库**）时，存储测试还会在真实 PostgreSQL 上再跑一遍，验证多连接并发。
+设置 `TEST_DATABASE_URL`（指向一个**专用的测试数据库**）时，存储测试还会在真实 PostgreSQL 上再跑一遍，验证多连接并发；运行锁、断开持锁连接后不写回这些测试只在真实 PostgreSQL 上跑。
+
+记忆的测试覆盖审核规则、私聊不进群、群里称呼各群通用、换称呼按说出时间、并发写称呼、安静后提炼与进度、失败跳过与花费上限、按说出时间到期、按人删除和运行锁，见 [记忆 v2 设计](docs/memory-v2-design.md) 第 14 节。提炼效果用 `npm run eval:memory` 调真模型评测（约 20 段虚构对话，一次不到 ¥0.01）。
 
 OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`）扮演 SnowLuma，覆盖断线重连、超时、假活、坏数据和发送节流，见 [Module 3 导读](docs/module-03-onebot.md)。
 
@@ -181,11 +184,12 @@ OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`
 
 ## 诚实的状态标注
 
-- ✅ 已实现并测试：人格引擎、长期记忆（含隐私隔离/导出/删除）、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
+- ✅ 已实现并测试：人格引擎、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
+- ✅ 记忆 v2：后台提炼带出处的事实、按地方取用（私聊不进群）、按说出时间到期、按人删除、运行锁（同一时间只有一个机器人，删除时机器人必须停）。
 - ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。
 - ✅ 模型调用：DeepSeek Responses API，一次回复 60 秒内必有结果、最多两次尝试、错误分类、按官方价格估算花费、每日花费上限、按会话限速（Module 4）。
 - ✅ 消息处理运行时：同一会话逐条处理、不同会话并行，重复消息只处理一次，太旧的消息不回复，发送失败如实记录、没连上时重连后补发，退出时等手上的消息处理完（Module 5）。
 - ✅ 上下文与长期记忆：全局持久代号、短期历史存数据库（24 小时内当上文）、规则印象跟着人走（群里只按群聊算）、具体事件只在原会话、私聊永远不进群、`self` 不再能看全部记录（Module 6）。
 - ✅ B站只读内容获取（Phase 2 之一）：热门 + 搜索真实拉取，转成统一 `content.read` 事件。
-- ✅ 存储：PostgreSQL + 编号迁移 + pg_dump 备份/恢复 + 旧 JSON 导入（Module 2）。
-- ⬜ 尚未接通：小红书/抖音只读（需账号/签名授权）、把 fish-os 记忆作为 DSH 工具注入 QQ 会话、LLM 摘要器/向量检索（当前规则检索 + 截断摘要，接口已预留）。
+- ✅ 存储：PostgreSQL + 编号迁移 + pg_dump 备份/恢复（Module 2）。
+- ⬜ 尚未接通：小红书/抖音只读（需账号/签名授权）、按意思检索事实（事实多到放不下时再做，见记忆 v2 设计第 15 节）。

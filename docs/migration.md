@@ -40,4 +40,4 @@ scripts/restore.sh backups/xxx.dump --yes   # 先停止机器人再恢复
 
 - 小红书、抖音只读接入：两者需要账号/签名/设备指纹，暂未实现；需你本人登录授权后按其官方/合规方式接入。
 - QQ 插件随 DSH profile 迁移：`~/.dsh/profiles/<name>` 与 `~/.dsh-qqbot` 一并备份即可；Linux 侧用 CLI 版 `npx @deepseek-ai/dsh --profile qqbot` 运行。
-- 建议后续把 fish-os 记忆以 DSH 工具形式（`fish_remember`/`fish_recall`/`fish_state`）注入 QQ 会话，形成「一套核心、多平台共用」的闭环。
+- 记忆已改为后台提炼带出处的事实、回复时按地方取用（见 [记忆 v2 设计](memory-v2-design.md)）。

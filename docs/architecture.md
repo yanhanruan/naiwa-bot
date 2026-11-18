@@ -20,15 +20,15 @@
                                   ▼
 ┌────────────────────────────────────────────────────────────┐
 │ fish-bot.mjs（Node 常驻进程 · 本机）                          │
-│   收到消息 → 检索记忆 → 拼 system prompt                     │
+│   收到消息 → 取记得的事 → 拼 system prompt                   │
 │     · 人设      persona/naiwa.md                            │
 │     · 社交准则  persona/social-rules.md（最高优先级）         │
-│     · 长期记忆  fish-os Memory（隐私隔离）                    │
+│     · 记得的事  带出处的事实（按地方取，私聊不进群）           │
 │     · 当前时间  北京时间（问日期/时间直接答，不搜）            │
 │     · 短期历史  每个 peer 最近 6 条（3 轮）                    │
 │   → 调 DeepSeek Responses API（60 秒内必有结果、花费有上限）│
 │   → 经 OneBot 发回 QQ（排队节流，逐条发送）                  │
-│   → 确认发出后写记忆（PostgreSQL）                           │
+│   → 确认发出后写原话和关系（PostgreSQL）；后台安静后提炼事实  │
 └────────────────────────────────────────────────────────────┘
                                   │  POST /v1/responses
                                   │  model: deepseek-v4-pro
@@ -53,7 +53,7 @@ flowchart TD
   E -->|回复| D
   D -->|OneBot 发消息| C
   C -->|回复| A
-  D -->|读写| F[(PostgreSQL<br/>memories / events / relationships …)]
+  D -->|读写| F[(PostgreSQL<br/>memory_facts / conversation_turns / relationships …)]
 ```
 
 ## 各层职责
@@ -62,16 +62,16 @@ flowchart TD
 |---|---|---|
 | QQ | 用户入口 | 你用小号登录、主号私聊/群聊 |
 | SnowLuma | QQ → OneBot 桥 | Docker 跑 Linux QQ，Hook 注入，暴露 OneBot v11 |
-| fish-bot | 数字生命本体 | 收消息、拼人设/记忆/时间/历史、调大脑、写记忆、发回 |
+| fish-bot | 数字生命本体 | 收消息、拼人设/记得的事/时间/历史、调大脑、发回、记原话；后台提炼事实 |
 | DeepSeek | 大脑 | Responses API + 服务端 `web_search`（v4-pro 专属） |
 
 ## 一条消息的生命周期
 
 1. 你在 QQ 发一句 → QQ 服务器 → SnowLuma 里的 QQ 客户端；
 2. SnowLuma Hook 捕获 → 转成 OneBot v11 事件 → WS `:3001` 推给 fish-bot；
-3. fish-bot 先去重（同一条消息只处理一次），再放进这个会话的队列：同一会话逐条处理，前一条回复完才处理下一条；轮到时检索这个会话可见的记忆、对发言者的印象、24 小时内的短期历史（都在数据库里），用全局代号拼 system prompt（人设/准则/当前发言者/记忆/时间）；
+3. fish-bot 先去重（同一条消息只处理一次），再放进这个会话的队列：同一会话逐条处理，前一条回复完才处理下一条；轮到时取这个地方的事实（加上涉及的人在群里说的称呼）、对发言者的印象、24 小时内的短期历史（都在数据库里），用全局代号拼 system prompt（人设/准则/当前发言者/你记得的事/时间）；
 4. 先检查今天的花费是否已达上限、这个会话是否调用太频繁，再调 `POST /v1/responses`（v4-pro + 服务端 web_search；模型自决是否搜，搜索在服务端完成），用量按官方价格估算后入账；
-5. 拿到回复 → 进入发送节流队列 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（情节记忆 + 关系）；
+5. 拿到回复 → 进入发送节流队列 → 通过 OneBot `send_private_msg` / `send_group_msg` 发回 → 确认发出后写入 PostgreSQL（原话 + 关系）；会话安静 10 分钟后，后台用 deepseek-flash 从原话里提炼事实（见 [记忆 v2 设计](memory-v2-design.md)）；
 6. 失败降级：第一次失败（超时、限流、服务端错误、空回复）就换“不搜索、不思考”再试一次，60 秒内必有结果；仍然失败时只发固定提示，不把错误原文发给用户。
 
 ## 传输层（OneBot 客户端）
@@ -110,21 +110,21 @@ fish-bot 与 SnowLuma 之间只有一条正向 WebSocket 连接，由 `src/adapt
 
 详见 [Module 5 导读](module-05-runtime.md)。
 
-## 上下文与长期记忆
+## 上下文与记忆
 
-记忆分三层（保守策略），见 `src/context/`、`src/schema.js`：
+见 `src/context/`、`src/memory/`：
 
-| 层次 | 可见范围 |
+| 内容 | 可见范围 |
 | --- | --- |
-| 对这个人的印象（昵称、熟不熟、`person:` 备注） | 跟着人走：任何群和私聊都放进提示；群里只按群聊互动算 |
-| 会话里发生的具体事（情节记忆） | 只在原会话 |
-| 私聊内容（历史、情节记忆） | 只在该私聊，永远不进任何群 |
+| 对这个人的印象（代号、昵称、熟不熟） | 跟着人走：任何群和私聊都放进提示；群里只按群聊互动算 |
+| 记得的事（称呼、个人情况、近况、群事） | 按地方：这个群或这个私聊的事实；只有群里说的称呼能带到别的群 |
+| 私聊内容（历史、事实） | 只在该私聊，永远不进任何群 |
 
 - 每个人一个全局、持久的代号（u1、u2…），任何会话里都一样；
 - 短期历史存在数据库里，重启不丢，只取 24 小时内的最近 3 轮；
-- `self` 只能看自我记忆和公开记忆，运维工具用 `OPERATOR` 看全部。
+- 运行锁：同一个数据库同时只有一个机器人；原话、关系、代号、事实、提炼进度只经持锁连接写入，连接一断机器人立即退出。
 
-详见 [Module 6 导读](module-06-context.md)。
+详见 [Module 6 导读](module-06-context.md) 和 [记忆 v2 设计](memory-v2-design.md)。
 
 ## 存储
 
@@ -132,14 +132,15 @@ PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结�
 
 | 表 | 内容 |
 | --- | --- |
-| `memories` | 长期记忆（情节/语义/自我…；按 access 隔离，唯一索引去重） |
 | `events` | 统一事件（审计/回溯，只追加） |
 | `character_state` | 情绪、创建时间 |
 | `interests` | 兴趣及权重 |
-| `relationships` | 每个人的关系：互动次数、好感度、备注 |
+| `relationships` | 每个人的关系：互动次数（另记群聊次数）、好感度、备注 |
 | `model_usage` | 模型用量账本：按北京时间的日期、会话、模型累计调用次数、token、搜索次数和估算花费（不存内容） |
 | `inbound_messages` | 入站消息记录：每条叫到奶蛙的消息的处理状态和结果，用于去重（不存内容，保留 30 天） |
 | `person_aliases` / `person_alias_counters` | 全局、持久的代号：每个人一个 u 编号 |
-| `conversation_turns` | 短期对话历史：每个会话最近几轮发给模型的消息（含聊天原文，保留 7 天） |
+| `conversation_turns` | 原话：每个会话发给模型的消息和发出的回复（含聊天原文，保留 7 天） |
+| `memory_facts` | 记得的事：带出处原话的短事实（按项目到期删除） |
+| `memory_progress` | 每个会话提炼到了哪条原话 |
 
 所有表带 `tenant_id`（目前只有 `default`）。详见 [Module 2 导读](module-02-storage.md)。

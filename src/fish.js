@@ -1,29 +1,28 @@
 import { EventStore } from './eventstore.js';
-import { MemoryService } from './memory.js';
 import { CharacterCore } from './character.js';
 import { Policy } from './policy.js';
 import { Scheduler } from './scheduler.js';
 import { Bridge } from './bridge.js';
-import { scope } from './schema.js';
 
-// 数字生命顶层编排：把人格、记忆、事件、策略、调度、Bridge 组装成一条「鱼」。
-// 平台适配器通过 reactTo / remember / recall / touch / act 与鱼交互。
+// 数字生命顶层编排：把人格、事件、策略、调度、Bridge 组装成一条「鱼」。
+// 平台适配器通过 reactTo / touch / act 与鱼交互。记忆（事实）见 src/memory/。
 // 所有持久化都通过 db（见 src/storage），因此涉及存储的方法都是异步的。
+// writer：forget-person 会删的数据走它写（持锁连接，见 src/storage/run-lock.js）；不传就用 db（测试、CLI）。
 export class Fish {
   // 用 Fish.open 创建：它会在数据库里准备好角色状态。
-  static async open({ db, tenantId = 'default', name = '奶蛙', persona = {}, policy = {} } = {}) {
-    const fish = new Fish({ db, tenantId, name, persona, policy });
+  static async open({ db, writer, tenantId = 'default', name = '奶蛙', persona = {}, policy = {} } = {}) {
+    const fish = new Fish({ db, writer, tenantId, name, persona, policy });
     await fish.character.init();
     return fish;
   }
 
-  constructor({ db, tenantId = 'default', name = '奶蛙', persona = {}, policy = {} } = {}) {
+  constructor({ db, writer = db, tenantId = 'default', name = '奶蛙', persona = {}, policy = {} } = {}) {
     if (!db) throw new Error('Fish requires a db（见 src/storage 的 openStorage）');
     this.db = db;
+    this.writer = writer ?? db;
     this.tenantId = tenantId;
     this.events = new EventStore(db, { tenantId });
-    this.memory = new MemoryService(db, { tenantId });
-    this.character = new CharacterCore({ db, tenantId, name, persona });
+    this.character = new CharacterCore({ db, writer: this.writer, tenantId, name, persona });
     this.policy = new Policy(policy);
     this.scheduler = new Scheduler({ policy: this.policy });
     this.bridge = new Bridge(this);
@@ -59,31 +58,6 @@ export class Fish {
 
   // —— 高级 API（平台适配器 / 工具调用统一入口）——
 
-  async remember({ type, content, tags, peers, importance, access, summary, meta }) {
-    const res = await this.memory.add({ type, content, tags, peers, importance, access, summary, meta });
-    if (res.added) {
-      await this.events.append({
-        kind: 'memory.added',
-        platform: 'fish-os',
-        payload: { id: res.record.id, type: res.record.type, access: res.record.access },
-        privacy: res.record.access,
-      });
-    }
-    return res;
-  }
-
-  async recall({ query, requester = 'self', types, limit }) {
-    const recs = await this.memory.retrieve({ query, requester, types, limit });
-    // 事件只记查询的字数，不记原文：聊天流程拿整条消息当查询，原文进事件表就会永久保存。
-    await this.events.append({
-      kind: 'memory.retrieved',
-      platform: 'fish-os',
-      payload: { queryChars: String(query ?? '').length, requester, count: recs.length },
-      privacy: 'self',
-    });
-    return recs;
-  }
-
   // 平台适配器把入站消息转成统一事件交给这里。
   async reactTo(event) {
     const ev = await this.events.append(event);
@@ -109,11 +83,6 @@ export class Fish {
     return events;
   }
 
-  // 形成简短观察（写入自我记忆）。
-  observe(content, { tags = [], importance = 0.4 } = {}) {
-    return this.remember({ type: 'self', content, tags, importance, access: 'self' });
-  }
-
   async touch(peerId, opts) {
     const rel = await this.character.touchRelationship(peerId, opts);
     await this.events.append({
@@ -121,7 +90,7 @@ export class Fish {
       platform: 'fish-os',
       target: peerId,
       payload: { sentiment: rel.sentiment, interactions: rel.interactions },
-      privacy: scope.private(peerId),
+      privacy: `private:${peerId}`,
     });
     return rel;
   }

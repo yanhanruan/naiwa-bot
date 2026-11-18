@@ -5,11 +5,10 @@ import { cpSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Fish, scope } from '../src/index.js';
+import { Fish } from '../src/index.js';
 import { PersonAliases } from '../src/context/aliases.js';
 import { ConversationHistory } from '../src/context/history.js';
 import { PersonImpressions } from '../src/context/impressions.js';
-import { dedupeKey } from '../src/memory.js';
 import { connectPGlite, migrate, openStorage } from '../src/storage/index.js';
 import { testDb, closeTestDb } from './helpers.js';
 
@@ -67,7 +66,7 @@ for (const { name, open } of backends) {
     assert.equal(await new ConversationHistory({ db, tenantId: tenant() }).prune(), 0);
   });
 
-  test(`[${name}] 规则印象：群里只按群聊互动算，各群一致；私聊用全部互动；person 备注会出现，private 私事绝不出现`, async () => {
+  test(`[${name}] 规则印象：群里只按群聊互动算，各群一致；私聊用全部互动；印象里没有任何聊天内容`, async () => {
     const db = await open();
     const fish = await Fish.open({ db, tenantId: tenant() });
     const impressions = new PersonImpressions({ db, tenantId: fish.tenantId });
@@ -77,29 +76,16 @@ for (const { name, open } of backends) {
     const stranger = await impressions.describe(person, { alias: 'u1', inGroup: true, now });
     assert.equal(stranger, '代号 u1。\n这是你们第一次在群里说话。');
 
-    // 私聊里聊了 3 次（关系记录 +3，私聊情节记忆 3 条）
-    for (let i = 0; i < 3; i += 1) {
-      await fish.touch(person, { name: '小甲' });
-      await fish.remember({ type: 'episodic', content: `私聊第${i}次说的悄悄话`, access: scope.conversation(PRIVATE), peers: [person] });
-    }
-    // 只私聊过的人，在群里的印象和陌生人完全一样：看不出私下跟奶蛙说过话
+    // 私聊里聊了 3 次：只私聊过的人，在群里的印象和陌生人完全一样，看不出私下跟奶蛙说过话
+    for (let i = 0; i < 3; i += 1) await fish.touch(person, { name: '小甲' });
     assert.equal(await impressions.describe(person, { alias: 'u1', inGroup: true, now }), stranger);
 
-    // 群里 2 次
-    for (const [conv, i] of [[GROUP_A, 0], [GROUP_B, 1]]) {
-      await fish.touch(person, { name: '小甲' });
-      await fish.remember({ type: 'episodic', content: `群里第${i}次的公开发言`, access: scope.conversation(conv), peers: [person] });
-    }
-    await fish.remember({ type: 'relational', content: '老客户，喜欢简短的回答', access: scope.person(person), peers: [person] });
-    await fish.remember({ type: 'semantic', content: '他私下说过的家庭住址', access: scope.private(person), peers: [person] });
-
+    // 群里 2 次（两个群合计）
+    for (let i = 0; i < 2; i += 1) await fish.touch(person, { name: '小甲', inGroup: true });
     const inGroup = await impressions.describe(person, { alias: 'u1', nickname: '小甲', inGroup: true, now });
-    assert.equal(inGroup, '代号 u1，QQ 昵称「小甲」。\n你们在群里聊过 2 次，最早一次是今天。\n- 老客户，喜欢简短的回答');
+    assert.equal(inGroup, '代号 u1，QQ 昵称「小甲」。\n你们在群里聊过 2 次，最早一次是今天。');
     const inPrivate = await impressions.describe(person, { alias: 'u1', nickname: '小甲', inGroup: false, now });
-    assert.match(inPrivate, /你们聊过 5 次/);
-    for (const text of [inGroup, inPrivate]) {
-      assert.ok(!text.includes('悄悄话') && !text.includes('家庭住址'), text);
-    }
+    assert.equal(inPrivate, '代号 u1，QQ 昵称「小甲」。\n你们聊过 5 次，最早一次是今天。');
   });
 }
 
@@ -125,42 +111,6 @@ test('迁移 005：抹掉历史检索事件里的查询原文，只留字数；�
       { queryChars: 3, requester: 'conv', count: 0 },
       { queryChars: 9, requester: 'conv', count: 2 },
     ]);
-  } finally {
-    await db.close();
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('去重键带上“是谁”：不同的人说了相同的内容各存各的；迁移 004 按同样的规则重算旧记录', async () => {
-  assert.notEqual(dedupeKey('我喜欢鲸鱼呀', ['qq:user:1']), dedupeKey('我喜欢鲸鱼呀', ['qq:user:2']));
-  assert.equal(dedupeKey('我喜欢鲸鱼呀', ['b', 'a', 'a']), dedupeKey('我 喜欢鲸鱼呀', ['a', 'b']));
-  assert.equal(dedupeKey('我喜欢鲸鱼呀'), '我喜欢鲸鱼呀');
-  assert.equal(dedupeKey('好', ['a']), null);
-
-  // 只执行到 003 的库：按旧规则（只看正文）写入记录，再执行 004。
-  const migrations = fileURLToPath(new URL('../migrations/', import.meta.url));
-  const dir = mkdtempSync(join(tmpdir(), 'naiwa-m004-'));
-  const db = await connectPGlite();
-  try {
-    for (const file of readdirSync(migrations).filter((f) => f < '004')) cpSync(join(migrations, file), join(dir, file));
-    await migrate(db, { dir });
-    const rows = [
-      { content: '我喜欢鲸鱼呀', peers: ['qq:user:2', 'qq:user:1'] },
-      { content: '没有人参与的记录', peers: [] },
-      { content: '短', peers: ['qq:user:1'] },
-      { content: 'Mixed Case 内容', peers: ['qq:user:Z', 'qq:user:a', 'qq:user:_'] },
-    ];
-    for (const row of rows) {
-      await db.query(
-        `INSERT INTO memories (id, tenant_id, ts, type, content, summary, peers, importance, access, dedupe_key)
-         VALUES ($1, 't', now(), 'episodic', $2, $2, $3, 0.5, 'public', $4)`,
-        [randomUUID(), row.content, row.peers, dedupeKey(row.content)],
-      );
-    }
-    cpSync(join(migrations, '004_context.sql'), join(dir, '004_context.sql'));
-    assert.deepEqual(await migrate(db, { dir }), ['004_context.sql']);
-    const { rows: migrated } = await db.query('SELECT content, peers, dedupe_key FROM memories ORDER BY content');
-    for (const row of migrated) assert.equal(row.dedupe_key, dedupeKey(row.content, row.peers), row.content);
   } finally {
     await db.close();
     rmSync(dir, { recursive: true, force: true });

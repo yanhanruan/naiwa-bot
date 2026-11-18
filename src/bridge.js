@@ -1,7 +1,7 @@
 import { validateCharacterState } from './schema.js';
 import { moodLabel } from './character.js';
 
-// Character OS Bridge：对外暴露结构化角色状态 / 记忆 / 意图执行接口。
+// Character OS Bridge：对外暴露结构化角色状态 / 意图执行接口。
 export class Bridge {
   constructor(fish) {
     this.fish = fish;
@@ -15,7 +15,7 @@ export class Bridge {
     return st;
   }
 
-  // 完整运行状态（含策略开关、记忆/事件计数），供 Character OS 或监控使用。
+  // 完整运行状态（含策略开关、事件计数），供 Character OS 或监控使用。
   async getStatus() {
     return {
       character: await this.getCharacterState(),
@@ -25,15 +25,9 @@ export class Bridge {
         dmApprovalRequired: this.fish.policy.dmApprovalRequired,
         pendingApprovals: this.fish.policy.pendingCount(),
       },
-      memory: { count: await this.fish.memory.count() },
       events: { count: await this.fish.events.count() },
       platforms: this.fish.connectedPlatforms ?? [],
     };
-  }
-
-  // 检索角色记忆（带隐私隔离）。
-  getMemory({ query = '', requester = 'self', types = null, limit = 10 } = {}) {
-    return this.fish.memory.retrieve({ query, requester, types, limit });
   }
 
   // 输出可供 Character OS 使用的结构化情绪/动作指令。

@@ -12,6 +12,12 @@
 //   MODEL_RATE_PER_HOUR      每个会话每小时最多调用几次，默认 120；0 表示不限
 //   DEEPSEEK_WEB_SEARCH      off 关闭联网搜索（默认开启，只有 deepseek-v4-pro 支持）
 //   DEEPSEEK_REASONING_EFFORT 思考强度，例如 none 关闭思考；不设置时用模型默认
+// 记忆（见 docs/memory-v2-design.md）：
+//   MEMORY_EXTRACTION        off 关闭后台提炼（回复时仍会用已有事实），默认开启
+//   MEMORY_MODEL             提炼用的模型，默认 deepseek-flash
+//   MEMORY_QUIET_MS          会话安静多久后提炼（毫秒），默认 600000（10 分钟）
+//   MEMORY_BATCH_FORCE       未提炼的原话攒到多少条就提炼，默认 40
+// 运行锁：同一个数据库同时只能有一个机器人在跑；运行中 forget-person 会被拒绝（见 src/storage/run-lock.js）。
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
@@ -23,6 +29,10 @@ import { ModelUsageLedger } from '../src/model/usage-ledger.js';
 import { ConversationRateLimiter } from '../src/model/rate-limiter.js';
 import { MessageInbox } from '../src/runtime/inbox.js';
 import { ConversationHistory } from '../src/context/history.js';
+import { PersonAliases } from '../src/context/aliases.js';
+import { FactStore } from '../src/memory/facts.js';
+import { MemoryExtractor } from '../src/memory/extractor.js';
+import { acquireRunLock } from '../src/storage/run-lock.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { loggerFromEnv } from '../src/log.js';
 
@@ -60,6 +70,14 @@ const ratePerMinute = numberFromEnv('MODEL_RATE_PER_MINUTE', 10);
 const ratePerHour = numberFromEnv('MODEL_RATE_PER_HOUR', 120);
 const webSearch = !/^(off|false|0|no)$/i.test(process.env.DEEPSEEK_WEB_SEARCH ?? '');
 const reasoningEffort = process.env.DEEPSEEK_REASONING_EFFORT?.trim() || undefined;
+const memoryExtraction = !/^(off|false|0|no)$/i.test(process.env.MEMORY_EXTRACTION ?? '');
+const memoryModel = process.env.MEMORY_MODEL?.trim() || 'deepseek-flash';
+const memoryQuietMs = numberFromEnv('MEMORY_QUIET_MS', 10 * 60_000);
+const memoryBatchForce = numberFromEnv('MEMORY_BATCH_FORCE', 40);
+if (!(memoryBatchForce >= 1)) {
+  console.error('MEMORY_BATCH_FORCE 必须不小于 1');
+  process.exit(1);
+}
 if (reasoningEffort && !/^[a-z]+$/.test(reasoningEffort)) {
   console.error('DEEPSEEK_REASONING_EFFORT 只能是小写字母组成的强度名，例如 none、low、high');
   process.exit(1);
@@ -70,11 +88,29 @@ const socialRulesPath = process.env.FISH_SOCIAL_RULES ?? join(root, 'persona', '
 const socialRules = existsSync(socialRulesPath) ? readFileSync(socialRulesPath, 'utf8') : '';
 // 连不上数据库或迁移失败会直接抛错退出，不会以空记忆启动。
 const db = await openStorage();
-const fish = await (await Fish.open({ db, name: '奶蛙' })).start();
+// 运行锁：拿不到说明已有机器人在跑（或者 forget-person 正在删数据），拒绝启动。
+// 拿到以后，原话、关系记录、代号、事实、提炼进度只经这条连接写入；这条连接一断，立即退出。
+let writer;
+try {
+  writer = await acquireRunLock({
+    databaseUrl: process.env.DATABASE_URL,
+    onLost: (error) => {
+      log.error('bot.run_lock_lost', { msg: '持锁连接断开，运行锁已失效，立即退出；请重新启动', error });
+      process.exit(1);
+    },
+  });
+} catch (error) {
+  console.error(error?.code === 'RUN_LOCK_BUSY'
+    ? '已有奶蛙在运行（或者 forget-person 正在删除数据），本次不启动。'
+    : `拿运行锁失败：${error?.message ?? error}`);
+  await db.close().catch(() => {});
+  process.exit(1);
+}
+const fish = await (await Fish.open({ db, writer, name: '奶蛙' })).start();
 // 模型调用适配器：超时与重试、花费估算入账、每日花费上限、按会话限速都在里面完成。
+const ledger = new ModelUsageLedger({ db, tenantId: fish.tenantId });
 const brain = new DeepSeekBrain({
-  apiKey, model, webSearch, reasoningEffort, logger: log, dailyBudgetCny,
-  ledger: new ModelUsageLedger({ db, tenantId: fish.tenantId }),
+  apiKey, model, webSearch, reasoningEffort, logger: log, dailyBudgetCny, ledger,
   limiter: new ConversationRateLimiter({ perMinute: ratePerMinute, perHour: ratePerHour }),
 });
 
@@ -95,8 +131,11 @@ const inbox = new MessageInbox({ db, tenantId: fish.tenantId });
 const interrupted = await inbox.recoverInterrupted();
 if (interrupted) log.warn('runtime.recovered', { msg: '上次退出时有消息没处理完，已标为中断', count: interrupted });
 // 短期对话历史存在数据库里（见 docs/module-06-context.md），超过 7 天的每天清理一次。
-const history = new ConversationHistory({ db, tenantId: fish.tenantId });
-// 两项分开清理：一项失败不能拖累另一项（对话历史含聊天原文，必须按期删除）。
+const history = new ConversationHistory({ db, writer, tenantId: fish.tenantId });
+const aliases = new PersonAliases({ db, writer, tenantId: fish.tenantId });
+// 记得的事（事实）：回复时读，后台提炼写；到期的每天清理一次。
+const facts = new FactStore({ db, writer, tenantId: fish.tenantId });
+// 各项分开清理：一项失败不能拖累另一项（对话历史含聊天原文，必须按期删除）。
 async function prune() {
   try {
     const removed = await inbox.prune();
@@ -110,6 +149,12 @@ async function prune() {
   } catch (error) {
     log.error('context.prune_failed', { msg: '清理对话历史失败', error });
   }
+  try {
+    const expired = await facts.prune();
+    if (expired) log.info('memory.pruned', { msg: '已清理到期的事实', count: expired });
+  } catch (error) {
+    log.error('memory.prune_failed', { msg: '清理到期事实失败', error });
+  }
 }
 await prune();
 setInterval(() => void prune(), 24 * 3_600_000).unref();
@@ -117,8 +162,16 @@ setInterval(() => void prune(), 24 * 3_600_000).unref();
 const sentMessageKeys = await inbox.recentSentMessages();
 
 const handleEvent = createQQHandler({
-  fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, sentMessageKeys,
+  fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, aliases, facts, sentMessageKeys,
 });
+
+// 后台提炼：便宜的模型，不联网、不思考；花费记在同一本账上，计入每日上限。
+const extractor = memoryExtraction ? new MemoryExtractor({
+  db, writer, tenantId: fish.tenantId, aliases, facts, logger: log, quietMs: memoryQuietMs, batchForce: memoryBatchForce,
+  brain: new DeepSeekBrain({
+    apiKey, model: memoryModel, webSearch: false, reasoningEffort: 'none', logger: log, dailyBudgetCny, ledger,
+  }),
+}).start() : null;
 // 一个长期存在的客户端：断线重连、请求超时、无响应探测、发送节流都在客户端内部完成。
 const client = new OneBotClient({
   url: ws,
@@ -143,8 +196,10 @@ async function shutdown(signal) {
   const unfinished = await handleEvent.stop(10_000);
   if (unfinished) log.warn('runtime.stopped', { msg: '还有消息没处理完，下次启动时标为中断', unfinished });
   client.stop();
+  extractor?.stop();
   try {
     await fish.stop();
+    await writer.close();
     await db.close();
   } catch (error) {
     log.error('bot.stop_failed', { msg: '退出时出错', error });
@@ -157,5 +212,7 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 log.info('bot.started', {
   msg: `${fish.character.name} 醒来`, model, webSearch, reasoningEffort, storage: 'PostgreSQL', recordFile: recordFile || undefined,
   dailyBudgetCny: dailyBudgetCny || '不限', ratePerMinute: ratePerMinute || '不限', ratePerHour: ratePerHour || '不限',
+  memoryExtraction, memoryModel: memoryExtraction ? memoryModel : undefined,
+  memoryQuietMs: memoryExtraction ? memoryQuietMs : undefined,
 });
 client.start();

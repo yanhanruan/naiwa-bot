@@ -71,7 +71,7 @@ npm test
 
 1. `.env` 里设置 `POSTGRES_PASSWORD` 和 `DATABASE_URL`（见 `.env.example`）。
 2. 启动数据库：`docker compose up -d db`。只监听 `127.0.0.1`，局域网访问不到。
-3. 导入旧数据（只需一次，可以重复执行）：
+3. 导入旧数据（只需一次，可以重复执行）。**2026-11-18 起导入脚本已删除**（导入早已做完，见[记忆 v2 设计](memory-v2-design.md)第 11 节），下面只作历史记录：
 
    ```bash
    node scripts/import-json.mjs --from data/naiwa --dry-run   # 先演练，只看报告

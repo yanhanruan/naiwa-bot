@@ -1,10 +1,13 @@
 // 全局、持久的代号：每个人（用户 key）在一个租户里只有一个代号 u1、u2…，任何群和私聊里都一样，重启不变。
 // 模型只看到代号，看不到 QQ 号或内部 key；同一个代号在不同会话里出现，模型就知道是同一个人。
 // 代号按第一次出现的顺序分配，分配后不会再变，所以可以放心缓存在进程里。
+// （forget-person 删代号前必须停机器人，重启后缓存是空的，见 docs/memory-v2-design.md 第 8 节。）
+// 分配代号要写表：走 writer（持锁连接，见 src/storage/run-lock.js）；查询走 db（连接池）。
 export class PersonAliases {
-  constructor({ db, tenantId = 'default' } = {}) {
+  constructor({ db, writer = db, tenantId = 'default' } = {}) {
     if (!db) throw new Error('PersonAliases 需要 db（见 src/storage 的 openStorage）');
     this.db = db;
+    this.writer = writer;
     this.tenantId = tenantId;
     this.cache = new Map(); // personKey -> 'u12'
   }
@@ -28,9 +31,24 @@ export class PersonAliases {
     return new Map(wanted.map((key) => [key, this.cache.get(key)]));
   }
 
+  /**
+   * 反查：代号 → 人的 key。查不到的（例如这个人已被 forget-person 删除）不在结果里。
+   * @param {string[]} aliases 形如 u12
+   * @returns {Promise<Map<string, string>>}
+   */
+  async keysOf(aliases) {
+    const numbers = [...new Set(aliases)].map((a) => /^u(\d+)$/.exec(a)).filter(Boolean).map((m) => Number(m[1]));
+    if (!numbers.length) return new Map();
+    const { rows } = await this.db.query(
+      'SELECT person_key, alias_no FROM person_aliases WHERE tenant_id = $1 AND alias_no = ANY($2::int[])',
+      [this.tenantId, numbers],
+    );
+    return new Map(rows.map((row) => [`u${row.alias_no}`, row.person_key]));
+  }
+
   // 先锁住这个租户的计数器，再检查、分配：另一个进程刚分配过的代号这时一定看得到，不会重号。
   async _assign(keys) {
-    const assigned = await this.db.transaction(async (tx) => {
+    const assigned = await this.writer.transaction(async (tx) => {
       await tx.query(
         'INSERT INTO person_alias_counters (tenant_id, last_no) VALUES ($1, 0) ON CONFLICT (tenant_id) DO NOTHING',
         [this.tenantId],

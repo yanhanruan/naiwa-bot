@@ -27,19 +27,23 @@ function relationshipFromRow(row) {
     firstSeen: row.first_seen.getTime(),
     lastSeen: row.last_seen.getTime(),
     interactions: row.interactions,
+    groupInteractions: row.group_interactions,
+    groupFirstSeen: row.group_first_seen ? row.group_first_seen.getTime() : null,
     sentiment: row.sentiment,
     notes: row.notes,
   };
 }
 
-const REL_COLUMNS = 'peer_key, name, first_seen, last_seen, interactions, sentiment, notes';
+const REL_COLUMNS = 'peer_key, name, first_seen, last_seen, interactions, group_interactions, group_first_seen, sentiment, notes';
 
 // 人格引擎（Character Core）：稳定核心性格 + 情绪状态 + 兴趣演化 + 关系认知。
 // 人设（persona）来自配置，只在内存；情绪、兴趣、关系存数据库，每次读写都走数据库，
 // 状态变化用单条 SQL 或行锁完成，多个进程同时操作不会互相覆盖。
+// 关系记录会被 forget-person 删除，写入走 writer（持锁连接，见 src/storage/run-lock.js）；其余走 db。
 export class CharacterCore {
-  constructor({ db, tenantId = 'default', id = 'fish', name = '小渔', persona = {}, moodDecayPerDay = 0.15 }) {
+  constructor({ db, writer = db, tenantId = 'default', id = 'fish', name = '小渔', persona = {}, moodDecayPerDay = 0.15 }) {
     this.db = db;
+    this.writer = writer;
     this.tenantId = tenantId;
     this.id = id;
     this.name = name;
@@ -157,23 +161,31 @@ export class CharacterCore {
       [this.tenantId, peerId],
     );
     if (rows[0]) return relationshipFromRow(rows[0]);
-    return { peerId, name: null, firstSeen: null, lastSeen: null, interactions: 0, sentiment: 0, notes: [] };
+    return {
+      peerId, name: null, firstSeen: null, lastSeen: null, interactions: 0, groupInteractions: 0, groupFirstSeen: null,
+      sentiment: 0, notes: [],
+    };
   }
 
   // 单条 upsert：互动次数 +1、好感度累加并限制在 [-1, 1]。两个进程同时 touch 也不会少算。
-  async touchRelationship(peerId, { name = null, deltaSentiment = 0, note = null } = {}) {
+  // inGroup：这次互动发生在群里，群聊计数也 +1（群里的熟悉程度只看它，见 src/context/impressions.js）。
+  async touchRelationship(peerId, { name = null, deltaSentiment = 0, note = null, inGroup = false } = {}) {
     const notes = note ? [{ ts: Date.now(), text: note }] : [];
-    const { rows } = await this.db.query(
-      `INSERT INTO relationships AS r (tenant_id, peer_key, name, first_seen, last_seen, interactions, sentiment, notes)
-       VALUES ($1, $2, $3, now(), now(), 1, LEAST(1, GREATEST(-1, $4::double precision)), $5::jsonb)
+    const { rows } = await this.writer.query(
+      `INSERT INTO relationships AS r (tenant_id, peer_key, name, first_seen, last_seen, interactions, sentiment, notes,
+         group_interactions, group_first_seen)
+       VALUES ($1, $2, $3, now(), now(), 1, LEAST(1, GREATEST(-1, $4::double precision)), $5::jsonb,
+         CASE WHEN $6::boolean THEN 1 ELSE 0 END, CASE WHEN $6::boolean THEN now() END)
        ON CONFLICT (tenant_id, peer_key) DO UPDATE SET
          name = COALESCE(EXCLUDED.name, r.name),
          last_seen = now(),
          interactions = r.interactions + 1,
          sentiment = LEAST(1, GREATEST(-1, r.sentiment + $4::double precision)),
-         notes = r.notes || $5::jsonb
+         notes = r.notes || $5::jsonb,
+         group_interactions = r.group_interactions + EXCLUDED.group_interactions,
+         group_first_seen = COALESCE(r.group_first_seen, EXCLUDED.group_first_seen)
        RETURNING ${REL_COLUMNS}`,
-      [this.tenantId, peerId, name, deltaSentiment || 0, JSON.stringify(notes)],
+      [this.tenantId, peerId, name, deltaSentiment || 0, JSON.stringify(notes), inGroup],
     );
     return relationshipFromRow(rows[0]);
   }
