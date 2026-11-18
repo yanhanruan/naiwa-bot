@@ -22,7 +22,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { Fish } from '../src/index.js';
-import { openStorage } from '../src/storage/index.js';
+import { openStorage, migrate } from '../src/storage/index.js';
 import { OneBotClient } from '../src/adapters/onebot.js';
 import { DeepSeekBrain } from '../src/model/brain.js';
 import { ModelUsageLedger } from '../src/model/usage-ledger.js';
@@ -86,9 +86,10 @@ if (reasoningEffort && !/^[a-z]+$/.test(reasoningEffort)) {
 const persona = existsSync(personaPath) ? readFileSync(personaPath, 'utf8') : '你是一只小青蛙。';
 const socialRulesPath = process.env.FISH_SOCIAL_RULES ?? join(root, 'persona', 'social-rules.md');
 const socialRules = existsSync(socialRulesPath) ? readFileSync(socialRulesPath, 'utf8') : '';
-// 连不上数据库或迁移失败会直接抛错退出，不会以空记忆启动。
-const db = await openStorage();
+// 连不上数据库会直接抛错退出，不会以空记忆启动。迁移等拿到运行锁以后再跑（见下）。
+const db = await openStorage({ migrateOnOpen: false });
 // 运行锁：拿不到说明已有机器人在跑（或者 forget-person 正在删数据），拒绝启动。
+// 先拿锁再迁移：误启动的第二个机器人（可能是更新的代码）不会在运行中的机器人底下改表结构。
 // 拿到以后，原话、关系记录、代号、事实、提炼进度只经这条连接写入；这条连接一断，立即退出。
 let writer;
 try {
@@ -103,6 +104,15 @@ try {
   console.error(error?.code === 'RUN_LOCK_BUSY'
     ? '已有奶蛙在运行（或者 forget-person 正在删除数据），本次不启动。'
     : `拿运行锁失败：${error?.message ?? error}`);
+  await db.close().catch(() => {});
+  process.exit(1);
+}
+try {
+  await migrate(db);
+} catch (error) {
+  // 迁移失败（整体回滚）：不以旧表结构启动。
+  console.error(`数据库迁移失败：${error?.message ?? error}`);
+  await writer.close();
   await db.close().catch(() => {});
   process.exit(1);
 }

@@ -22,7 +22,7 @@ export { PersonImpressions } from './context/impressions.js';
 export { FactStore, ITEMS, pickFacts, formatRemembered, writeFact } from './memory/facts.js';
 export { MemoryExtractor, MEMORY_DEFAULTS } from './memory/extractor.js';
 export { EXTRACTION_PROMPT, renderTurn, buildExtractionInput, parseFacts, checkFact } from './memory/extraction.js';
-export { deletePersonData } from './memory/forget.js';
+export { countPersonData, deletePersonData } from './memory/forget.js';
 export { placeOf, parsePersonKey } from './memory/place.js';
 export { acquireRunLock, serialize, RunLockBusyError, RUN_LOCK_KEY } from './storage/run-lock.js';
 export * from './schema.js';

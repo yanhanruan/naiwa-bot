@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   Fish, ModelError, PersonAliases, ConversationHistory, FactStore, MemoryExtractor, writeFact, pickFacts, formatRemembered,
-  renderTurn, buildExtractionInput, parseFacts, checkFact, placeOf, deletePersonData, acquireRunLock, RunLockBusyError,
+  renderTurn, buildExtractionInput, parseFacts, checkFact, placeOf, countPersonData, deletePersonData, acquireRunLock, RunLockBusyError,
 } from '../src/index.js';
 import { daysAgo } from '../src/memory/facts.js';
 import { createQQHandler } from '../src/qq-handler.js';
@@ -179,6 +179,12 @@ test('审核：出处是别人的话、是奶蛙的话、编号不存在、项�
     batch: [turn(1, 'u3', '我喜欢钓鱼，电话 138-1234-5678，看 https://x.example/a')], place: placeA, personOf,
   });
   assert.equal(masked.fact.sourceQuote, '我喜欢钓鱼，电话 ***，看 [网址]');
+  // 日期不是号码；网址后面紧跟的中文不会被一起打码
+  const dated = checkFact(fact('u3', '近况', '2026-12-05 去上海出差', 1), {
+    batch: [turn(1, 'u3', '我 2026-12-05 去上海出差，攻略看 https://x.cn/a这个店的汉堡')], place: placeA, personOf,
+  });
+  assert.equal(dated.ok, true);
+  assert.equal(dated.fact.sourceQuote, '我 2026-12-05 去上海出差，攻略看 [网址]这个店的汉堡');
 });
 
 test('挑选：只放涉及的人和本群的群事；每人的称呼只留最晚的一条；超过上限只放最新的', () => {
@@ -243,6 +249,7 @@ for (const { name, open } of backends) {
       .map((f) => f.content).sort();
     assert.deepEqual(await seen(GROUP_B), ['希望被叫“甲哥”']);
     assert.deepEqual(await seen(GROUP_B, [Q]), []);
+    assert.deepEqual(await seen(GROUP_A, [Q]), ['群 A 的群事'], '同一个群里别人的事实不取');
     assert.deepEqual(await seen(GROUP_A), ['希望被叫“甲哥”', '群 A 的群事', '群 A 里的个人情况', '群 A 里的近况'].sort());
     assert.deepEqual(await seen(GROUP_A_OTHER_ACCOUNT), await seen(GROUP_A), '换了机器人账号，记忆不断');
     assert.deepEqual(await seen(DM), ['希望被叫“甲哥”', '私聊里说的'].sort());
@@ -366,7 +373,10 @@ for (const { name, open } of backends) {
     const results = await env.extractor.runDue();
     assert.deepEqual(results.map((r) => r.outcome), ['budget'], '花费到上限后不再处理别的会话');
     assert.deepEqual(await env.progress(GROUP_A), progress, '不算失败');
-    assert.deepEqual(env.logs.find('memory.budget_wait').length, 1);
+    const calls = env.brain.calls.length;
+    assert.deepEqual(await env.extractor.runDue(), [], '当天不再尝试');
+    assert.equal(env.brain.calls.length, calls);
+    assert.deepEqual(env.logs.find('memory.budget_wait').length, 1, '只记一次');
   });
 
   test(`[${name}] 提炼时带上已知事实；群里换称呼经提炼写入后，所有群都只剩新称呼`, async () => {
@@ -419,8 +429,11 @@ for (const { name, open } of backends) {
     await env.extractor.runDue();
     assert.deepEqual((await env.allFacts(P)).sort(), ['call_name:希望被叫“甲哥”', 'profile:不吃辣']);
 
+    const expected = { facts: 3, privateTurns: 2, groupTurns: 2, progress: 1, relationships: 1, aliases: 1 };
+    assert.deepEqual(await countPersonData(db, { tenantId: env.tenantId, personKey: P }), expected, '预览只数不删');
+    assert.equal((await env.allFacts(P)).length, 2, '预览后什么都没删');
     const counts = await db.transaction((tx) => deletePersonData(tx, { tenantId: env.tenantId, personKey: P }));
-    assert.deepEqual(counts, { facts: 3, privateTurns: 2, groupTurns: 2, progress: 1, relationships: 1, aliases: 1 });
+    assert.deepEqual(counts, expected);
     assert.deepEqual(await env.allFacts(P), []);
     assert.deepEqual(await env.allFacts(placeA.key), ['profile:喜欢猫'], '只剩别人的事实');
     const { rows: turns } = await db.query(

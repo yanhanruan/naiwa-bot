@@ -3,7 +3,7 @@ import { Fish } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
 import { acquireRunLock } from '../src/storage/run-lock.js';
 import { FactStore, ITEMS } from '../src/memory/facts.js';
-import { deletePersonData } from '../src/memory/forget.js';
+import { countPersonData, deletePersonData } from '../src/memory/forget.js';
 import { parsePersonKey } from '../src/memory/place.js';
 
 // CLI 是运维工具。查看事实不按地方隔离，能看到全部；聊天流程只能经 FactStore.inView 读。
@@ -43,8 +43,6 @@ function printFacts(title, facts) {
   }
 }
 
-class Rollback extends Error {}
-
 // 按人删除（docs/memory-v2-design.md 第 8 节）。不加 --yes 只预览条数；加了 --yes 先拿运行锁，拿不到说明机器人还在跑，拒绝。
 async function forgetPerson(fish, personKey, yes) {
   if (!parsePersonKey(personKey)) {
@@ -54,11 +52,7 @@ async function forgetPerson(fish, personKey, yes) {
   }
   const args = { tenantId: fish.tenantId, personKey };
   if (!yes) {
-    let counts;
-    await fish.db.transaction(async (tx) => {
-      counts = await deletePersonData(tx, args);
-      throw new Rollback(); // 只数不删
-    }).catch((error) => { if (!(error instanceof Rollback)) throw error; });
+    const counts = await countPersonData(fish.db, args); // 只读，不删
     console.log(JSON.stringify({ preview: counts }, null, 2));
     console.error('以上是将要删除的条数，没有删除任何数据。确认删除：先停掉机器人，再加 --yes 重新执行。');
     process.exitCode = 1;

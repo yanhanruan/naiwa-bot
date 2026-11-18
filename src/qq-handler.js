@@ -132,14 +132,19 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     const aliasMap = await aliases.resolve(people);
     const aliasOf = (key) => aliasMap.get(key);
     const place = placeOf(conversation.key);
-    const remembered = pickFacts(await facts.inView(place.key, people), { people, place, limit: maxFacts });
+    // 三样互不依赖，一起读。短期历史存在数据库里，重启不丢；只取 24 小时内的最近几条。
+    const [inView, impression, recent] = await Promise.all([
+      facts.inView(place.key, people),
+      impressions.describe(sender.key, {
+        alias: aliasOf(sender.key), nickname: sender.nickname, inGroup: conversation.kind === 'group', now: now(),
+      }),
+      history.recent(conversation.key),
+    ]);
+    const remembered = pickFacts(inView, { people, place, limit: maxFacts });
     if (remembered.facts.length) {
       // 只记编号不记内容，方便查“这句回复为什么这么说”。
       log.info('memory.injected', { factIds: remembered.facts.map((f) => f.id), dropped: remembered.dropped || undefined });
     }
-    const impression = await impressions.describe(sender.key, {
-      alias: aliasOf(sender.key), nickname: sender.nickname, inGroup: conversation.kind === 'group', now: now(),
-    });
     const systemContent = [
       persona,
       socialRules ? `## 聊天行为准则（最高优先级，冲突时以此为准）\n${socialRules}` : '',
@@ -149,8 +154,6 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       formatRemembered(remembered.facts, { people, senderKey: sender.key, aliasOf, now: now() }),
       `## 当前时间\n现在是 ${nowText(now())}（北京时间）。被问到「今天几号」「现在几点」时直接用这个时间回答，不需要联网搜索。`,
     ].filter(Boolean).join('\n\n');
-    // 短期历史存在数据库里，重启不丢；只取 24 小时内的最近几条。
-    const recent = await history.recent(conversation.key);
     const userMessage = { role: 'user', content: messageForModel(message, aliasOf) };
     // 消息 key 用于日志关联；会话 key 用于按会话限速和用量统计。
     const reply = String(await brain.chat(

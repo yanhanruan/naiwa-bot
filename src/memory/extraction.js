@@ -138,14 +138,19 @@ export function parseFacts(text) {
 
 const URL_PATTERN = /https?:\/\/|www\.|[a-z0-9-]+\.(?:com|cn|net|org|top|xyz|io)\b/i;
 // 7 位以上的数字（中间可以有空格或横线）：手机号、身份证号、银行卡号这类。
+// 日期（2026-12-05、2026/12/5）不算：先去掉日期再数数字。
 const LONG_NUMBER = /\d[\d\s-]{5,}\d/g;
-const hasLongNumber = (s) => [...s.matchAll(LONG_NUMBER)].some(([m]) => m.replace(/\D/g, '').length >= 7);
+const DATE = /\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/g;
+const isLongNumber = (m) => m.replace(DATE, '').replace(/\D/g, '').length >= 7;
+const hasLongNumber = (s) => [...s.matchAll(LONG_NUMBER)].some(([m]) => isLongNumber(m));
+// 网址只取 ASCII 部分：中文后面紧跟网址时，不把后面的中文也当成网址吞掉。
+const URL_TEXT = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#[\]@!$&'()*+,;=%]+/gi;
 
 // 出处原话的副本会跟着事实保存很久：网址和长数字串打码再存。
 function quoteOf(turns) {
   const masked = turns.map((t) => t.text).join(' / ')
-    .replace(LONG_NUMBER, (m) => (m.replace(/\D/g, '').length >= 7 ? '***' : m))
-    .replace(/https?:\/\/\S+|www\.\S+/gi, '[网址]');
+    .replace(URL_TEXT, '[网址]')
+    .replace(LONG_NUMBER, (m) => (isLongNumber(m) ? '***' : m));
   return cut(masked, MAX_QUOTE_CHARS);
 }
 

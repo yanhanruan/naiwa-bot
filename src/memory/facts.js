@@ -58,7 +58,8 @@ export class FactStore {
   }
 
   /**
-   * 读事实的唯一入口：这个地方的事实，加上这些人在群里说的称呼。两个参数缺一不可。
+   * 读事实的唯一入口：这个地方关于这些人的事实和这个地方的群事，加上这些人在群里说的称呼。两个参数缺一不可。
+   * 只取涉及的人，大群里不会把所有人的事实都读出来。
    * @param {string} placeKey 见 src/memory/place.js
    * @param {string[]} personKeys 这条消息涉及的人
    */
@@ -68,7 +69,7 @@ export class FactStore {
     const { rows } = await this.db.query(
       `SELECT ${COLUMNS} FROM memory_facts
         WHERE tenant_id = $1 AND expires_at > now()
-          AND (place_key = $2
+          AND ((place_key = $2 AND (subject_key = ANY($3::text[]) OR item = 'group_event'))
                OR (item = 'call_name' AND place_kind = 'group' AND subject_key = ANY($3::text[])))
         ORDER BY said_at, id`,
       [this.tenantId, placeKey, personKeys],

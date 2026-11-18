@@ -1,4 +1,5 @@
 import { silentLogger } from '../log.js';
+import { beijingDate } from '../model/pricing.js';
 import { placeOf } from './place.js';
 import { pickFacts, writeFact } from './facts.js';
 import { EXTRACTION_PROMPT, buildExtractionInput, checkFact, parseFacts, renderTurn } from './extraction.js';
@@ -48,6 +49,7 @@ export class MemoryExtractor {
     this.timer = null;
     this.running = null;
     this.stopped = false;
+    this.budgetDay = null; // 今日花费到上限的那天（北京时间）：当天不再尝试提炼
   }
 
   start() {
@@ -94,6 +96,7 @@ export class MemoryExtractor {
   // 一个接一个提炼该提炼的会话。今日花费到上限时停下，等第二天。
   async runDue() {
     const results = [];
+    if (this.budgetDay === beijingDate(this.now())) return results;
     for (const conversationKey of await this.dueConversations()) {
       if (this.stopped) break;
       let result;
@@ -153,6 +156,8 @@ export class MemoryExtractor {
     );
     const batch = rows.map(renderTurn);
     const context = before.reverse().map(renderTurn);
+    // 进度推到读到的最后一条。这依赖“原话编号按提交顺序递增”：原话只经持锁连接一条一条写入（见 src/storage/run-lock.js），
+    // 不会有编号更小的原话在之后才提交。如果以后有别的写入路径（例如连接池），这里会漏掉那些原话。
     const batchEnd = batch.at(-1).id;
 
     // 说话人的代号全局固定，能反查出是谁。
@@ -171,7 +176,9 @@ export class MemoryExtractor {
       raws = parseFacts(text);
     } catch (error) {
       if (error?.code === 'BUDGET_EXCEEDED') {
-        log.info('memory.budget_wait', { msg: '今日模型花费已达上限，明天再提炼' });
+        // 当天只记一次，之后的检查直接跳过，不再每分钟查库、调模型、写日志。
+        this.budgetDay = beijingDate(this.now());
+        log.info('memory.budget_wait', { msg: '今日模型花费已达上限，北京时间零点后再提炼' });
         return { outcome: 'budget' };
       }
       if (this.stopped) return { outcome: 'stopped' };
