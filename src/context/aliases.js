@@ -18,6 +18,20 @@ export class PersonAliases {
    */
   async resolve(keys) {
     const wanted = [...new Set(keys.filter(Boolean))];
+    const found = await this.known(wanted);
+    const unassigned = wanted.filter((key) => !found.has(key));
+    if (unassigned.length) await this._assign(unassigned);
+    return new Map(wanted.map((key) => [key, this.cache.get(key)]));
+  }
+
+  /**
+   * 只查已经有的代号，不分配新的：没有代号的人不在结果里，也不会因此在数据库里留下记录。
+   * 用于群里最近的聊天里只在旁边说话、没找过奶蛙的人。
+   * @param {Array<string|null|undefined>} keys 空值会被忽略
+   * @returns {Promise<Map<string, string>>}
+   */
+  async known(keys) {
+    const wanted = [...new Set(keys.filter(Boolean))];
     const missing = wanted.filter((key) => !this.cache.has(key));
     if (missing.length) {
       const { rows } = await this.db.query(
@@ -25,10 +39,8 @@ export class PersonAliases {
         [this.tenantId, missing],
       );
       for (const row of rows) this.cache.set(row.person_key, `u${row.alias_no}`);
-      const unassigned = missing.filter((key) => !this.cache.has(key));
-      if (unassigned.length) await this._assign(unassigned);
     }
-    return new Map(wanted.map((key) => [key, this.cache.get(key)]));
+    return new Map(wanted.filter((key) => this.cache.has(key)).map((key) => [key, this.cache.get(key)]));
   }
 
   /**

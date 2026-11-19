@@ -53,16 +53,23 @@ export class Participation {
   }
 
   // 开头叫它：“奶蛙，…”“奶蛙 …”“奶蛙？”“奶蛙你…”，或者整条就是“奶蛙”。名字在句子中间不算。
-  callsByName(text) {
+  // 返回叫到的是哪个名字，没叫到返回 null。
+  calledName(text) {
     const t = String(text ?? '').trim();
-    return this.botNames.some((name) => t.startsWith(name) && AFTER_NAME.test(t.slice(name.length)));
+    return this.botNames.find((name) => t.startsWith(name) && AFTER_NAME.test(t.slice(name.length))) ?? null;
+  }
+
+  callsByName(text) {
+    return this.calledName(text) !== null;
   }
 
   /**
    * 判断一条消息。会消耗“接着说”：同一个人的下一条用掉以后就没了，奶蛙回复他才再给。
+   * 这条消息最后没处理（重复收到、太旧）时，用 giveBack 还回去。
    * @param {import('../message.js').InboundMessage} message
    * @param {{quotesSelf?: boolean}} [context] quotesSelf：这条消息引用了奶蛙发过的消息
-   * @returns {{action: 'reply'|'judge'|'wait'|'ignore', reason: string, notify?: boolean}}
+   * @returns {{action: 'reply'|'judge'|'wait'|'ignore', reason: string, notify?: boolean, until?: number, name?: string}}
+   *   until：“接着说”原来的截止时间；name：叫到的名字
    */
   classify(message, { quotesSelf = false } = {}) {
     const person = message.sender.key;
@@ -74,9 +81,18 @@ export class Participation {
       return isEmptyMention(message) ? { action: 'wait', reason: 'empty_mention' } : { action: 'reply', reason: 'mention' };
     }
     if (quotesSelf) return { action: 'reply', reason: 'quote' };
-    if (this._takeFollowUp(key)) return { action: 'judge', reason: 'follow_up' };
-    if (this.callsByName(message.text)) return { action: 'judge', reason: 'name' };
+    const until = this._takeFollowUp(key);
+    if (until !== null) return { action: 'judge', reason: 'follow_up', until };
+    const name = this.calledName(message.text);
+    if (name !== null) return { action: 'judge', reason: 'name', name };
     return { action: 'ignore', reason: 'not_addressed' };
+  }
+
+  // 这条消息最后没处理（重复收到、太旧）：把它用掉的“接着说”还回去，免得耽误这个人真正的下一条。
+  giveBack(conversationKey, personKey, decision) {
+    if (decision?.reason !== 'follow_up') return;
+    const key = keyOf(conversationKey, personKey);
+    if (!this.followUps.has(key)) this.followUps.set(key, decision.until);
   }
 
   // 这个人在群里叫了奶蛙（@、引用、只 @ 不说话）：从现在起他的下一条算“接着说”。
@@ -99,11 +115,12 @@ export class Participation {
     this._sweep();
   }
 
+  // 用掉“接着说”：还在时间内就返回原来的截止时间，否则返回 null。
   _takeFollowUp(key) {
     const until = this.followUps.get(key);
-    if (until === undefined) return false;
+    if (until === undefined) return null;
     this.followUps.delete(key);
-    return this.now() <= until;
+    return this.now() <= until ? until : null;
   }
 
   _capped(key) {

@@ -20,7 +20,8 @@
 // 群里什么时候说话（见 docs/module-07-group-chat-design.md）：
 //   BOT_NAMES                能叫它的名字（逗号分隔），默认 奶蛙；消息以名字开头才算叫它
 //   IGNORE_QQ                不理的 QQ 号（逗号分隔），例如群里别的机器人；他们的话也不进群里最近的聊天
-//   GROUP_CONTEXT            off 不把群里最近的聊天放进提示（默认放：最近 20 条、10 分钟内、整段最多 1000 字，只在内存里）
+//   GROUP_CONTEXT            off 不把群里最近的聊天放进提示（默认放：最近 20 条、10 分钟内、整段最多 1000 字，只在内存里）；
+//                            关掉后不记内容，只记谁什么时候说了话，用来判断回复时要不要引用原消息
 // 运行锁：同一个数据库同时只能有一个机器人在跑；运行中 forget-person 会被拒绝（见 src/storage/run-lock.js）。
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -85,7 +86,8 @@ if (!(memoryBatchForce >= 1)) {
   console.error('MEMORY_BATCH_FORCE 必须不小于 1');
   process.exit(1);
 }
-const listFromEnv = (name) => (process.env[name] ?? '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+// 只按逗号分隔：名字里可以有空格（例如 "Nai Wa"）。
+const listFromEnv = (name) => (process.env[name] ?? '').split(/[,，]/).map((x) => x.trim()).filter(Boolean);
 const botNames = listFromEnv('BOT_NAMES').length ? listFromEnv('BOT_NAMES') : ['奶蛙'];
 const ignoreQQ = listFromEnv('IGNORE_QQ');
 if (ignoreQQ.some((id) => !/^\d+$/.test(id))) {
@@ -190,7 +192,7 @@ const handleEvent = createQQHandler({
   fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, aliases, facts, sentMessageKeys,
   botNames,
   participation: new Participation({ botNames, ignoreUsers: ignoreQQ.map((id) => entityKey('qq', 'user', id)) }),
-  groupContext: groupContextOn ? new GroupContext() : null,
+  groupContext: new GroupContext({ keepText: groupContextOn }),
 });
 
 // 后台提炼：便宜的模型，不联网、不思考；花费记在同一本账上，计入每日上限。

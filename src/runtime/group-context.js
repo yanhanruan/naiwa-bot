@@ -2,13 +2,16 @@
 // 每个群最近的几条消息，奶蛙被叫到、或者要判断回不回时，放进提示当上文。
 // - 只在机器人进程的内存里：不写数据库，不提炼成记忆，重启就没了；
 // - 奶蛙回复过的消息会移走（它们已经在对话历史里），不重复放；
-// - 条数、时间、字数都有上限：群友贴一篇长文，也只占一小段。
+// - 条数、时间、字数都有上限：群友贴一篇长文，也只占一小段；
+// - 还用来判断回复时要不要引用原消息（countAfter）。keepText 为 false 时只记谁在什么时候说了话，
+//   不记内容，也不放进提示（GROUP_CONTEXT=off），引用照常判断。
 
 export const GROUP_CONTEXT_DEFAULTS = {
   maxEntries: 20, // 每个群最多几条
   maxAgeMs: 10 * 60_000, // 只取多久以内的
   maxEntryChars: 100, // 每条最多几个字，超出截短
   maxTotalChars: 1000, // 整段最多几个字，超出时先丢最早的
+  keepText: true, // false：不记内容、不放进提示，只用来判断要不要引用
 };
 
 function cut(text, max) {
@@ -56,7 +59,8 @@ export class GroupContext {
     const list = this._fresh(conversationKey);
     if (list.some((e) => e.key === message.key)) return;
     this.seq += 1;
-    list.push({ key: message.key, seq: this.seq, at: this.now(), sender: message.sender.key, parts: partsOf(message) });
+    const parts = this.options.keepText ? partsOf(message) : [];
+    list.push({ key: message.key, seq: this.seq, at: this.now(), sender: message.sender.key, parts });
     while (list.length > this.options.maxEntries) list.shift();
     this.groups.set(conversationKey, list);
   }
@@ -71,19 +75,25 @@ export class GroupContext {
   }
 
   // 某条消息之后，别人（不算这条消息的发言者）又说了几条。用来决定回复时要不要引用原消息。
+  // 这条已经找不到了：被后来的消息挤出去（超过条数上限）或者已经过了时间，说明群里又说了很多，返回 Infinity。
+  // （处理中的群消息收到时都记过，所以找不到只可能是这两种情况。）
   countAfter(conversationKey, messageKey, exceptPersonKey) {
     const list = this._fresh(conversationKey);
     const entry = list.find((e) => e.key === messageKey);
-    if (!entry) return 0;
+    if (!entry) return Infinity;
     return list.filter((e) => e.seq > entry.seq && e.sender !== exceptPersonKey).length;
   }
 
   /**
-   * 放进提示的最近聊天（不含 excludeKey 这一条），从早到晚。
+   * 放进提示的最近聊天：只取 beforeKey 这条消息之前的，从早到晚。它之后才到的不算“刚才在聊”，
+   * 放进来会让模型以为这些话在它前面。beforeKey 这条已经被挤出去时，剩下的都比它晚，返回空。
    * @returns {Array<{sender: string, at: number, parts: Array}>}
    */
-  recent(conversationKey, { excludeKey } = {}) {
-    return this._fresh(conversationKey).filter((e) => e.key !== excludeKey);
+  recent(conversationKey, { beforeKey } = {}) {
+    const list = this._fresh(conversationKey);
+    if (beforeKey === undefined) return list;
+    const index = list.findIndex((e) => e.key === beforeKey);
+    return index === -1 ? [] : list.slice(0, index);
   }
 
   _fresh(conversationKey) {
@@ -107,21 +117,29 @@ export function peopleIn(entries) {
 
 /**
  * 提示里的“群里刚才在聊”一节。没有消息时返回空字符串（这一节整个省掉）。
+ * 还没有代号的人（只在旁边说话、没找过奶蛙）在这一段里临时叫 x1、x2，不为他们分配永久代号。
  * @param {Array} entries GroupContext.recent 的结果
- * @param {{aliasOf: (key: string) => string, botName?: string, now?: number, maxEntryChars?: number, maxTotalChars?: number}} opts
+ * @param {{aliasOf: (key: string) => string|undefined, botName?: string, now?: number, maxEntryChars?: number, maxTotalChars?: number}} opts
  */
 export function formatGroupContext(entries, {
   aliasOf, botName = '奶蛙', now = Date.now(),
   maxEntryChars = GROUP_CONTEXT_DEFAULTS.maxEntryChars, maxTotalChars = GROUP_CONTEXT_DEFAULTS.maxTotalChars,
 }) {
+  const temp = new Map();
+  const nameOf = (key) => {
+    const alias = aliasOf(key);
+    if (alias) return alias;
+    if (!temp.has(key)) temp.set(key, `x${temp.size + 1}`);
+    return temp.get(key);
+  };
   const lines = entries.map((e) => {
     const text = e.parts.map((p) => {
       if (p.type === 'self') return `@${botName}`;
-      if (p.type === 'mention') return `@${aliasOf(p.userKey) ?? '某人'}`;
+      if (p.type === 'mention') return `@${nameOf(p.userKey)}`;
       return p.text;
     }).join('').replace(/\s+/g, ' ').trim();
     const minutes = Math.floor((now - e.at) / 60_000);
-    return `${aliasOf(e.sender) ?? '某人'}（${minutes < 1 ? '刚才' : `${minutes} 分钟前`}）：${cut(text || '[其他内容]', maxEntryChars)}`;
+    return `${nameOf(e.sender)}（${minutes < 1 ? '刚才' : `${minutes} 分钟前`}）：${cut(text || '[其他内容]', maxEntryChars)}`;
   });
   // 整段超过字数上限时，先丢最早的。
   const kept = [];
@@ -133,5 +151,7 @@ export function formatGroupContext(entries, {
     total += length;
   }
   if (!kept.length) return '';
-  return ['## 群里刚才在聊（只供理解，这些不是在跟你说话；从早到晚）', ...kept].join('\n');
+  const header = ['## 群里刚才在聊（只供理解，这些不是在跟你说话；从早到晚）'];
+  if (temp.size) header.push('（x1、x2 这样的是还没有代号的人，只在这一段里用）');
+  return [...header, ...kept].join('\n');
 }

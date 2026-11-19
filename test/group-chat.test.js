@@ -104,8 +104,10 @@ test('判断：私聊、@、引用一定回；只 @ 不说话先等；开头叫�
     [{ message: [{ type: 'image', data: { file: 'x.jpg' } }] }, 'ignore', 'not_addressed'],
   ];
   for (const [overrides, action, reason] of cases) {
-    assert.deepEqual(p.classify(msg(overrides)), { action, reason }, JSON.stringify(overrides));
+    const got = p.classify(msg(overrides));
+    assert.deepEqual({ action: got.action, reason: got.reason }, { action, reason }, JSON.stringify(overrides));
   }
+  assert.equal(p.classify(msg({ message: '奶蛙，你在干嘛' })).name, '奶蛙', '带上叫到的名字');
   assert.deepEqual(p.classify(msg({ message: '[CQ:reply,id=5]哈哈' }), { quotesSelf: true }), { action: 'reply', reason: 'quote' });
   assert.equal(isEmptyMention(msg({ message: '[CQ:at,qq=900]  ' })), true);
   assert.equal(isEmptyMention(msg({ message: '[CQ:reply,id=5][CQ:at,qq=900]' })), false);
@@ -126,7 +128,10 @@ test('判断：接着说只看下一条，1 分钟内；奶蛙回了再给 1 分
   assert.equal(next().action, 'ignore', '没叫过奶蛙');
   p.noteCalled(conv, P);
   now += 30_000;
-  assert.deepEqual(next(), { action: 'judge', reason: 'follow_up' });
+  const taken = next();
+  assert.deepEqual([taken.action, taken.reason], ['judge', 'follow_up']);
+  p.giveBack(conv, P, taken); // 这条最后没处理（重复收到、太旧）：还回去
+  assert.equal(next().action, 'judge', '还回来的“接着说”照样能用');
   assert.equal(next().action, 'ignore', '只看下一条');
   p.noteSent(conv, P);
   now += 60_000;
@@ -160,10 +165,16 @@ test('群里最近的聊天：最多 20 条、10 分钟内；每条超过 100 �
   let entries = ctx.recent(conv);
   assert.equal(entries.length, 20);
   assert.equal(entries[0].parts[0].text, '第6条');
-  assert.equal(ctx.recent(conv, { excludeKey: KEY(25) }).length, 19);
+  assert.equal(ctx.recent(conv, { beforeKey: KEY(25) }).length, 19);
+  assert.deepEqual(ctx.recent(conv, { beforeKey: KEY(10) }).map((e) => e.parts[0].text), ['第6条', '第7条', '第8条', '第9条'], '只取这条之前的');
+  assert.deepEqual(ctx.recent(conv, { beforeKey: KEY(3) }), [], '这条已经被挤出去：剩下的都比它晚');
   ctx.remove(conv, KEY(24));
   assert.equal(ctx.recent(conv).length, 19);
   assert.equal(ctx.countAfter(conv, KEY(20), 'qq:user:102'), 3, '第 21、22、23、25 条里不是 102 说的');
+  assert.equal(ctx.countAfter(conv, KEY(3), 'qq:user:102'), Infinity, '被挤出去了：后面又来了很多条');
+  const textless = new GroupContext({ keepText: false, now: () => now });
+  textless.add(msg({ message: '不记内容' }));
+  assert.deepEqual(textless.recent(conv)[0].parts, [], 'GROUP_CONTEXT=off：只记谁说了话，不记内容');
   now += 10 * 60_000 + 1;
   assert.deepEqual(ctx.recent(conv), [], '10 分钟以前的不要');
 
@@ -183,6 +194,11 @@ test('群里最近的聊天：最多 20 条、10 分钟内；每条超过 100 �
   // 整段超过上限：先丢最早的
   assert.equal(formatGroupContext(entries, { aliasOf, now, maxTotalChars: 130 }).split('\n').length, 3);
   assert.equal(formatGroupContext([], { aliasOf, now }), '');
+  // 还没有代号的人（只在旁边说话）：这一段里临时叫 x1、x2
+  const partial = formatGroupContext(entries, { aliasOf: (key) => (key === 'qq:user:102' ? 'u2' : undefined), now });
+  assert.equal(partial.split('\n')[1], '（x1、x2 这样的是还没有代号的人，只在这一段里用）');
+  assert.match(partial, /\nu2（2 分钟前）：@奶蛙@x1看/);
+  assert.match(partial, /\nx1（2 分钟前）：长/);
 });
 
 // —— 只 @ 不说话 ——
@@ -268,6 +284,35 @@ test('只 @ 不说话：退出时还在等的就不发了', async () => {
   assert.equal(h.sent.length, 0);
 });
 
+test('只 @ 不说话：“干嘛蛙”没发出去（排太久），之后这个人随便说一句，不会被当成接着说', async () => {
+  const h = await setup();
+  await h.say({ message: '[CQ:at,qq=900]' });
+  h.clock += 4 * 60_000; // 轮到时已经超过 3 分钟
+  h.timers.fire();
+  await waitFor(async () => (await h.status(1)) === 'dropped', { what: '“干嘛蛙”太旧，不发了' });
+  await h.say({ message: '今天好热' });
+  assert.equal(h.sent.length, 0);
+  assert.equal(h.requests.length, 0, '不是在跟奶蛙说话，不调用模型');
+});
+
+test('只 @ 不说话：这条的消息记录还没建好时就接着说了，空 @ 也记成并到下一条', async () => {
+  const h = await setup();
+  const claim = h.inbox.claim.bind(h.inbox);
+  let release;
+  const slow = new Promise((resolve) => { release = resolve; });
+  h.inbox.claim = async (message) => {
+    if (message.key === KEY(1)) await slow; // 第一条（空 @）的记录建得很慢
+    return claim(message);
+  };
+  const empty = h.say({ message: '[CQ:at,qq=900]' });
+  await h.say({ message: '在吗' });
+  release();
+  await empty;
+  assert.deepEqual(h.texts(), ['收到']);
+  assert.deepEqual([await h.status(1), await h.outcome(1)], ['skipped', 'merged']);
+  assert.equal(h.timers.size, 0);
+});
+
 // —— 交给模型判断 ——
 
 test('开头叫它：交给模型判断；模型说不用回就一个字都不发，不写原话表；名字在中间、@全体不理', async () => {
@@ -287,6 +332,15 @@ test('开头叫它：交给模型判断；模型说不用回就一个字都不�
   await h.say({ user_id: 102, message: '这个奶蛙表情包笑死' });
   await h.say({ user_id: 102, message: '[CQ:at,qq=all]开会了' });
   assert.equal(h.requests.length, 2);
+});
+
+test('开头叫它：提示里写的是叫到的那个名字（名字可以配置）', async () => {
+  const h = await setup({ botNames: ['小蛙', '蛙蛙'] });
+  h.reply = () => SILENT_MARK;
+  await h.say({ message: '蛙蛙，在吗' });
+  assert.match(system(h.requests[0]), /也可能只是在聊“蛙蛙”这个梗/);
+  await h.say({ user_id: 102, message: '奶蛙，在吗' });
+  assert.equal(h.requests.length, 1, '不是它的名字');
 });
 
 test('接着说：出错、限速、花费到上限都不出声；一定回的照常发提示', async () => {
@@ -320,6 +374,17 @@ test('接着说：@ 完 1 分钟内的下一条交给模型；回了再给 1 分
   h.clock += 61_000;
   await h.say({ message: '还在吗' });
   assert.equal(h.requests.length, 4, '超过 1 分钟不再理');
+});
+
+test('接着说：重复收到的消息不会用掉“接着说”', async () => {
+  const h = await setup();
+  await h.say({ message: '[CQ:at,qq=900]推荐个奶茶' });
+  await h.say({ message: '要少糖的' }); // 第 2 条：接着说，奶蛙回了，又给 1 分钟
+  assert.equal(h.requests.length, 2);
+  await h.handle(event({ time: Math.floor(h.clock / 1000), message_id: 2, message: '要少糖的' })); // 第 2 条又收到一次
+  await h.say({ message: '再加个布丁' });
+  assert.equal(h.requests.length, 3, '真正的下一条照样交给模型');
+  assert.match(system(h.requests[2]), /这个人刚才和你说过话/);
 });
 
 // —— 防刷屏 ——
@@ -356,16 +421,35 @@ test('回谁说清楚：奶蛙想回复时群里又有别人说了 2 条以上�
   assert.deepEqual(h.sent[1].message, [{ type: 'text', data: { text: '芋泥波波' } }], '只插了 1 条，不引用');
 });
 
+test('回谁说清楚：原消息已经被挤出群里最近的聊天，照样引用；GROUP_CONTEXT=off 也照样判断', async () => {
+  for (const groupContext of [new GroupContext({ maxEntries: 3 }), new GroupContext({ keepText: false })]) {
+    const h = await setup({ groupContext });
+    const gates = gate(h);
+    const first = h.say({ message: '[CQ:at,qq=900]推荐个奶茶' });
+    await waitFor(() => gates.length === 1);
+    for (let i = 0; i < 4; i += 1) await h.say({ user_id: 102 + (i % 2), message: `插话${i}` });
+    gates[0]('杨枝甘露');
+    await first;
+    assert.deepEqual(h.sent[0].message[0], { type: 'reply', data: { id: '1' } });
+    if (!groupContext.options.keepText) assert.ok(!system(h.requests[0]).includes('群里刚才在聊'), 'off 时不放进提示');
+  }
+});
+
 // —— 群里最近的聊天放进提示 ——
 
-test('群里最近的聊天：被叫到时放进提示，用代号；回复过的不重复；不写数据库；GROUP_CONTEXT=off 时没有这一段', async () => {
+test('群里最近的聊天：被叫到时放进提示；回复过的不重复；不写数据库，旁边说话的人也不分配代号；GROUP_CONTEXT=off 时没有这一段', async () => {
   const h = await setup();
   await h.say({ user_id: 102, message: '周末去哪玩' });
   await h.say({ user_id: 103, message: [{ type: 'text', data: { text: '这里' } }, { type: 'image', data: { file: 'x.jpg' } }] });
   await h.say({ message: '[CQ:at,qq=900]我们刚才在聊什么' });
   const section = system(h.requests[0]).split('\n\n').find((s) => s.startsWith('## 群里刚才在聊'));
-  assert.match(section, /\nu\d+（刚才）：周末去哪玩\nu\d+（刚才）：这里\[图片\]$/);
+  assert.match(section, /\nx1（刚才）：周末去哪玩\nx2（刚才）：这里\[图片\]$/);
+  assert.match(section, /x1、x2 这样的是还没有代号的人/);
   assert.ok(!section.includes('我们刚才在聊什么'), '这条本身不放');
+  const { rows: aliasRows } = await h.fish.db.query(
+    'SELECT person_key FROM person_aliases WHERE tenant_id = $1', [h.fish.tenantId],
+  );
+  assert.deepEqual(aliasRows.map((r) => r.person_key), [P], '只在旁边说话的人不写进代号表');
   await h.say({ message: '[CQ:at,qq=900]还有呢' });
   assert.ok(!system(h.requests[1]).includes('我们刚才在聊什么'), '回复过的已经在对话历史里');
   const stored = JSON.stringify(await h.turns());
@@ -375,6 +459,23 @@ test('群里最近的聊天：被叫到时放进提示，用代号；回复过�
   await off.say({ user_id: 102, message: '周末去哪玩' });
   await off.say({ message: '[CQ:at,qq=900]我们刚才在聊什么' });
   assert.ok(!system(off.requests[0]).includes('群里刚才在聊'));
+});
+
+test('群里最近的聊天：只放这条消息之前的，排队期间别人后来说的不放', async () => {
+  const h = await setup();
+  const gates = gate(h);
+  await h.say({ user_id: 104, message: '明天集合吗' });
+  const first = h.say({ user_id: 102, message: '[CQ:at,qq=900]先问一个' }); // 占着这个群的队列
+  await waitFor(() => gates.length === 1);
+  const second = h.say({ message: '[CQ:at,qq=900]明天几点集合' });
+  await h.say({ user_id: 103, message: '8 点，我刚说过' }); // 比第 3 条晚到
+  gates[0]('好');
+  await first;
+  await waitFor(() => gates.length === 2);
+  assert.match(system(h.requests[1]), /明天集合吗/);
+  assert.ok(!system(h.requests[1]).includes('我刚说过'), '后来才说的不当成“刚才在聊”');
+  gates[1]('8 点');
+  await second;
 });
 
 test('私聊不受影响：只发图片也回，没有群里的聊天；提示里写明看不到图片内容，准则不再要求识别图片含义', async () => {

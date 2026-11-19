@@ -39,13 +39,13 @@ export const SILENT_MARK = '[不回复]';
 
 // 为什么会给模型看这条消息（Module 7 第 3、4 节）。一定回的大多不用说明，信封里的 @ 和引用已经说清楚了。
 const TRIGGER_NOTES = {
-  after_empty_mention: '这个人刚才单独 @ 了你一下，这是他接着说的话。',
-  follow_up: '这个人刚才和你说过话，这条没有 @ 你：可能是接着跟你说，也可能是在跟别人说。',
-  name: '这条消息以你的名字开头，但没有 @ 你：可能是在叫你，也可能只是在聊“奶蛙”这个梗。',
+  after_empty_mention: () => '这个人刚才单独 @ 了你一下，这是他接着说的话。',
+  follow_up: () => '这个人刚才和你说过话，这条没有 @ 你：可能是接着跟你说，也可能是在跟别人说。',
+  name: (decision) => `这条消息以你的名字开头，但没有 @ 你：可能是在叫你，也可能只是在聊“${decision.name}”这个梗。`,
 };
 
 function triggerSection(decision) {
-  const note = TRIGGER_NOTES[decision.reason];
+  const note = TRIGGER_NOTES[decision.reason]?.(decision);
   if (!note) return '';
   const lines = ['## 这条消息为什么会给你看', note];
   if (decision.action === 'judge') {
@@ -124,7 +124,8 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   facts = new FactStore({ db: fish.db, writer: fish.writer, tenantId: fish.tenantId }),
   maxFacts = 20,
   sentMessageKeys = [], // 重启前奶蛙发出的消息 key（见 MessageInbox.recentSentMessages），用于识别对它们的引用
-  // 群里什么时候说话（Module 7）。groupContext 传 null 表示不把群里最近的聊天放进提示。
+  // 群里什么时候说话（Module 7）。groupContext 用 keepText: false 表示不把群里最近的聊天放进提示（引用照常判断）；
+  // 传 null 表示完全不记，也就不会引用原消息。
   botNames = ['奶蛙'],
   participation = new Participation({ botNames, now: clock }),
   groupContext = new GroupContext({ now: clock }),
@@ -153,6 +154,12 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   // state：waiting（在等这个人接着说）→ queued（“干嘛蛙”排进了队列）；开始发送时从这里移走。
   const pendingEmpty = new Map();
   const waitKey = (message) => `${message.conversation.key}\u001f${message.sender.key}`;
+
+  // 这条消息涉及的人：发言者和被 @ 的人（不含奶蛙自己）。
+  const peopleOf = (message) => [...new Set([message.sender.key, ...message.segments
+    .filter((s) => s.type === 'mention' && s.target === 'user' && s.userId !== message.account.id)
+    .map((s) => s.userKey)])];
+
   // 只生成回复，不产生任何记录；记录在确认发出后由 record() 完成。
   // 上下文（保守策略，见 docs/module-06-context.md 和 docs/memory-v2-design.md）：
   // - 对这个人的印象跟着人走：任何群和私聊都放进提示（规则印象，不含聊天内容）；
@@ -160,15 +167,15 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   // - 短期历史属于这个会话，私聊的历史也永远不进群。
   async function generateReply(message, log, decision) {
     const { conversation, sender } = message;
-    // 这条消息涉及的人：发言者和被 @ 的人。代号全局一致，重启不变。
-    const mentioned = message.segments
-      .filter((s) => s.type === 'mention' && s.target === 'user' && s.userId !== message.account.id)
-      .map((s) => s.userKey);
-    const people = [...new Set([sender.key, ...mentioned])];
-    // 群里最近的聊天（只在内存里）。里面说话的人也用代号表示，所以一起取代号。
-    const nearby = conversation.kind === 'group' && groupContext ? groupContext.recent(conversation.key, { excludeKey: message.key }) : [];
-    const aliasMap = await aliases.resolve([...people, ...peopleIn(nearby)]);
-    const aliasOf = (key) => aliasMap.get(key);
+    // 这条消息涉及的人要有代号（全局一致，分配了就是永久的）。
+    const people = peopleOf(message);
+    const aliasMap = await aliases.resolve(people);
+    // 群里最近的聊天（只在内存里，只取这条之前的）。里面只在旁边说话的人只查已有的代号，
+    // 没有的在提示里临时叫 x1、x2，不为他们在数据库里建记录。
+    const nearby = conversation.kind === 'group' && groupContext?.options.keepText
+      ? groupContext.recent(conversation.key, { beforeKey: message.key }) : [];
+    const bystanders = await aliases.known(peopleIn(nearby).filter((key) => !aliasMap.has(key)));
+    const aliasOf = (key) => aliasMap.get(key) ?? bystanders.get(key);
     const place = placeOf(conversation.key);
     // 三样互不依赖，一起读。短期历史存在数据库里，重启不丢；只取 24 小时内的最近几条。
     const [inView, impression, recent] = await Promise.all([
@@ -212,10 +219,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
 
   // 只取发言者和被 @ 的人的代号（“干嘛蛙”不调用模型，只需要把空 @ 写进原话表）。
   async function envelopeFor(message) {
-    const keys = [message.sender.key, ...message.segments
-      .filter((s) => s.type === 'mention' && s.target === 'user' && s.userId !== message.account.id)
-      .map((s) => s.userKey)];
-    const aliasMap = await aliases.resolve(keys);
+    const aliasMap = await aliases.resolve(peopleOf(message));
     return { role: 'user', content: messageForModel(message, (key) => aliasMap.get(key)) };
   }
 
@@ -267,25 +271,36 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     }
   }
 
-  // 这个人刚才只 @ 不说话、还在等：撤掉那条（还没发“干嘛蛙”的话），返回 true。同步执行，见 decide()。
+  // 这个人刚才只 @ 不说话、还在等：撤掉那条（还没发“干嘛蛙”的话）。同步执行，见 decide()。
   function dropPendingEmpty(held, next) {
     pendingEmpty.delete(waitKey(held.message));
     held.cancelled = true;
     if (held.state === 'waiting') {
       timers.clearTimeout(held.timer);
-      held.log.info('message.merged', { msg: '只 @ 不说话之后接着说了，并到下一条', nextMessageKey: next.key });
-      void saveResult(held.message, held.log, { status: 'skipped', outcome: 'merged' });
+      held.mergedInto = next.key;
+      // 那条空 @ 的消息记录可能还没建好（handleEvent 还在等 inbox.claim），那时由它自己记“并到下一条”。
+      if (held.claimed) void markMerged(held);
     }
     // queued：排着的“干嘛蛙”轮到时看到 cancelled，自己记成并到下一条。
   }
 
+  function markMerged(held) {
+    held.log.info('message.merged', { msg: '只 @ 不说话之后接着说了，并到下一条', nextMessageKey: held.mergedInto });
+    return saveResult(held.message, held.log, { status: 'skipped', outcome: 'merged' });
+  }
+
   // 只 @ 不说话：先不进队列，暂存起来等这个人接着说；到时还没说，就把“干嘛蛙”送进队列。
+  // claimed：这条消息的记录已经建好（见 handleEvent）；mergedInto：并到了哪条消息。
   function holdEmptyMention(message, log, receivedAt) {
-    const held = { message, log, receivedAt, timer: null, state: 'waiting', cancelled: false };
+    const held = { message, log, receivedAt, timer: null, state: 'waiting', cancelled: false, claimed: false, mergedInto: null };
     held.timer = timers.setTimeout(() => {
       if (pendingEmpty.get(waitKey(message)) !== held || held.state !== 'waiting') return;
       held.state = 'queued';
-      void enqueue(message, log, receivedAt, { action: 'fixed', reason: 'empty_mention', held });
+      // 不管“干嘛蛙”最后发没发出（发了、排队满了、排太久、出错），处理完都不再等这个人：
+      // 留着的话，他很久以后随便说的一句也会被当成“只 @ 不说话之后接着说的”，一定回。
+      enqueue(message, log, receivedAt, { action: 'fixed', reason: 'empty_mention', held })
+        .catch((error) => log.error('message.failed', { msg: '处理消息时出现意外错误', error }))
+        .finally(() => releaseHold(held));
     }, emptyMentionWaitMs);
     pendingEmpty.set(waitKey(message), held);
     return held;
@@ -350,15 +365,20 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     } catch (error) {
       log.error('inbox.failed', { msg: '读写消息记录失败，按新消息处理', error });
     }
-    if (!first) {
+    // 这条最后不处理（重复收到、太旧）：放掉等待，把判断时用掉的“接着说”还回去。
+    const discard = () => {
       releaseHold(decision.held);
+      participation.giveBack(message.conversation.key, message.sender.key, decision);
+    };
+    if (!first) {
+      discard();
       log.info('message.duplicate', { msg: '重复收到的消息，已跳过' });
       return;
     }
     // 收到时就已经太旧（例如奶蛙停机期间积压的消息），不再回复。
     const ageMs = clock() - message.ts;
     if (ageMs > maxAgeMs) {
-      releaseHold(decision.held);
+      discard();
       log.info('message.skipped', { msg: '消息太旧，不再回复', reason: 'stale', ageMs });
       await saveResult(message, log, { status: 'skipped', outcome: 'stale' });
       return;
@@ -366,6 +386,13 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     // 叫了奶蛙（不含交给模型判断的）：他的下一条算“接着说”。
     if (isGroup && decision.action !== 'judge') participation.noteCalled(message.conversation.key, message.sender.key);
     if (decision.action === 'wait') {
+      const { held } = decision;
+      held.claimed = true;
+      // 等记录建好的这段时间里他已经接着说了：这时才记“并到下一条”。
+      if (held.mergedInto) {
+        await markMerged(held);
+        return;
+      }
       log.info('message.waiting', { msg: '只 @ 不说话，先等他接着说', waitMs: emptyMentionWaitMs });
       return;
     }
