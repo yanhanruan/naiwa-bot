@@ -7,10 +7,10 @@
 // 状态：queued（排队中）→ processing（处理中）→ 结束状态之一：
 //   replied     发出了模型的回复
 //   notice      发出了固定提示（模型失败、花费上限、会话限速、内容过滤）
-//   silent      按规则不回复（同一段限速时间里的第二次及以后）
+//   silent      按规则不回复：同一段限速时间里的第二次及以后；交给模型判断、模型说不用回（model_silent）或出错（Module 7）
 //   send_failed 没发出去；delivery 说明是肯定没发出（not_sent）还是可能已发出（unknown）
 //   dropped     排队太久或队列已满，没有处理
-//   skipped     收到时已经太旧，没有处理
+//   skipped     收到时已经太旧（stale）；或者只 @ 不说话、接着说了，并到下一条（merged）
 //   abandoned   处理到一半时进程退出或重启
 
 import { messageKey } from '../identity.js';

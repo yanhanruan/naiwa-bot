@@ -17,6 +17,10 @@
 //   MEMORY_MODEL             提炼用的模型，默认 deepseek-flash
 //   MEMORY_QUIET_MS          会话安静多久后提炼（毫秒），默认 600000（10 分钟）
 //   MEMORY_BATCH_FORCE       未提炼的原话攒到多少条就提炼，默认 40
+// 群里什么时候说话（见 docs/module-07-group-chat-design.md）：
+//   BOT_NAMES                能叫它的名字（逗号分隔），默认 奶蛙；消息以名字开头才算叫它
+//   IGNORE_QQ                不理的 QQ 号（逗号分隔），例如群里别的机器人；他们的话也不进群里最近的聊天
+//   GROUP_CONTEXT            off 不把群里最近的聊天放进提示（默认放：最近 20 条、10 分钟内、整段最多 1000 字，只在内存里）
 // 运行锁：同一个数据库同时只能有一个机器人在跑；运行中 forget-person 会被拒绝（见 src/storage/run-lock.js）。
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,6 +37,9 @@ import { PersonAliases } from '../src/context/aliases.js';
 import { FactStore } from '../src/memory/facts.js';
 import { MemoryExtractor } from '../src/memory/extractor.js';
 import { acquireRunLock } from '../src/storage/run-lock.js';
+import { Participation } from '../src/runtime/participation.js';
+import { GroupContext } from '../src/runtime/group-context.js';
+import { entityKey } from '../src/identity.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { loggerFromEnv } from '../src/log.js';
 
@@ -78,6 +85,14 @@ if (!(memoryBatchForce >= 1)) {
   console.error('MEMORY_BATCH_FORCE 必须不小于 1');
   process.exit(1);
 }
+const listFromEnv = (name) => (process.env[name] ?? '').split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+const botNames = listFromEnv('BOT_NAMES').length ? listFromEnv('BOT_NAMES') : ['奶蛙'];
+const ignoreQQ = listFromEnv('IGNORE_QQ');
+if (ignoreQQ.some((id) => !/^\d+$/.test(id))) {
+  console.error('IGNORE_QQ 只能填 QQ 号（数字），多个用逗号分隔');
+  process.exit(1);
+}
+const groupContextOn = !/^(off|false|0|no)$/i.test(process.env.GROUP_CONTEXT ?? '');
 if (reasoningEffort && !/^[a-z]+$/.test(reasoningEffort)) {
   console.error('DEEPSEEK_REASONING_EFFORT 只能是小写字母组成的强度名，例如 none、low、high');
   process.exit(1);
@@ -173,6 +188,9 @@ const sentMessageKeys = await inbox.recentSentMessages();
 
 const handleEvent = createQQHandler({
   fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, aliases, facts, sentMessageKeys,
+  botNames,
+  participation: new Participation({ botNames, ignoreUsers: ignoreQQ.map((id) => entityKey('qq', 'user', id)) }),
+  groupContext: groupContextOn ? new GroupContext() : null,
 });
 
 // 后台提炼：便宜的模型，不联网、不思考；花费记在同一本账上，计入每日上限。
@@ -224,5 +242,6 @@ log.info('bot.started', {
   dailyBudgetCny: dailyBudgetCny || '不限', ratePerMinute: ratePerMinute || '不限', ratePerHour: ratePerHour || '不限',
   memoryExtraction, memoryModel: memoryExtraction ? memoryModel : undefined,
   memoryQuietMs: memoryExtraction ? memoryQuietMs : undefined,
+  botNames, ignoreQQ: ignoreQQ.length || undefined, groupContext: groupContextOn,
 });
 client.start();

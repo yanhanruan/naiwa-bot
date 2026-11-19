@@ -21,6 +21,11 @@ export async function openFish({ tenantId = `test-${randomUUID()}`, ...opts } = 
   return (await Fish.open({ db, tenantId, ...opts })).start();
 }
 
+// 多数入口测试不关心群里什么时候说话：群里每条消息都按“一定回”处理。Module 7 的规则另有测试（test/group-chat.test.js）。
+export function replyToEveryone() {
+  return { classify: () => ({ action: 'reply', reason: 'test' }), isIgnored: () => false, noteCalled() {}, noteSent() {} };
+}
+
 // 轮询等待某个条件成立（每 5 毫秒查一次），超时抛错。
 export async function waitFor(check, { timeoutMs = 3000, what = '条件满足' } = {}) {
   const startedAt = Date.now();

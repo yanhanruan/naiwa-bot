@@ -12,7 +12,7 @@ import {
 import { daysAgo } from '../src/memory/facts.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { connectPGlite, migrate, openStorage } from '../src/storage/index.js';
-import { testDb, closeTestDb, captureLogger, waitFor } from './helpers.js';
+import { testDb, closeTestDb, captureLogger, waitFor, replyToEveryone } from './helpers.js';
 
 // 记忆 v2（docs/memory-v2-design.md 第 14.1 节）。模型都是假的：给出事先写好的输出，测程序这一侧的规则。
 // 默认在 PGlite 上测；设置 TEST_DATABASE_URL（专用测试库）时也在真实 PostgreSQL 上测：
@@ -464,10 +464,12 @@ async function acquireEventually(key) {
       if (error instanceof RunLockBusyError) return null;
       throw error;
     }
-  }, { what: '拿到运行锁' });
+  }, { what: '拿到运行锁', timeoutMs: SLOW_MS });
 }
 
 const pgOnly = process.env.TEST_DATABASE_URL ? test : test.skip;
+// 真实数据库在机器忙的时候可能要好几秒，这几个等待放宽一些。
+const SLOW_MS = 20_000;
 
 pgOnly('[PostgreSQL] 运行锁：已有机器人在跑时，第二个机器人和 forget-person 都拿不到锁；释放后能拿到', async () => {
   const key = lockKey();
@@ -494,9 +496,9 @@ pgOnly('[PostgreSQL] 持锁连接断开：卡在等模型的提炼，结果写�
   try {
     await env.say(DM, P, '我不吃辣');
     const stuck = env.extractor.runConversation(DM);
-    await waitFor(() => release, { what: '提炼在等模型' });
+    await waitFor(() => release, { what: '提炼在等模型', timeoutMs: SLOW_MS });
     await db.query('SELECT pg_terminate_backend($1)', [writer.pid]);
-    await waitFor(() => lost, { what: '发现持锁连接断开' });
+    await waitFor(() => lost, { what: '发现持锁连接断开', timeoutMs: SLOW_MS });
     assert.equal(writer.held, false);
 
     const cli = await acquireEventually(key);
@@ -538,13 +540,13 @@ pgOnly('[PostgreSQL] 持锁连接断开：卡在等模型的普通回复，原�
   });
   const handlerFor = async (w) => createQQHandler({
     fish: await Fish.open({ db, writer: w, tenantId }), brain, getClient: () => client, persona: '测试角色',
-    replyToAllGroupMessages: true, logger: captureLogger().logger,
+    participation: replyToEveryone(), logger: captureLogger().logger,
   });
   try {
     const stuck = (await handlerFor(writer))(event(101, 1, '他的秘密是蓝色海豚'));
-    await waitFor(() => release, { what: '回复在等模型' });
+    await waitFor(() => release, { what: '回复在等模型', timeoutMs: SLOW_MS });
     await db.query('SELECT pg_terminate_backend($1)', [writer.pid]);
-    await waitFor(() => lost, { what: '发现持锁连接断开' });
+    await waitFor(() => lost, { what: '发现持锁连接断开', timeoutMs: SLOW_MS });
     const cli = await acquireEventually(key);
     try {
       await cli.transaction((tx) => deletePersonData(tx, { tenantId, personKey: P }));

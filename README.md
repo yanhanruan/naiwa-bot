@@ -6,7 +6,7 @@
 
 > 纯 ESM，Node ≥ 22.4（用到内置的 WebSocket）。数据存 PostgreSQL（驱动 `pg`）；测试用进程内 PostgreSQL（PGlite）和本地假 OneBot 服务端，`npm test` 不需要启动任何服务。
 
-> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)；Module 5（消息处理运行时：同一会话逐条处理、去重、发送失败如实记录与补发）见 [Module 5 导读](docs/module-05-runtime.md)；Module 6（上下文与长期记忆：全局代号、重启不丢历史、跨会话认人、私聊不进群）见 [Module 6 导读](docs/module-06-context.md)；记忆重做（v2：后台提炼带出处的事实、按地方取用、按人删除）见 [记忆 v2 设计](docs/memory-v2-design.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
+> **模块改造进度**：见 [路线图](docs/roadmap.md)。Module 1（身份与消息模型）已完成，见 [Module 1 导读](docs/module-01-identity.md)；Module 2（PostgreSQL 存储）见 [Module 2 导读](docs/module-02-storage.md)；Module 3（OneBot 传输层：断线重连、超时、发送节流、结构化日志）见 [Module 3 导读](docs/module-03-onebot.md)；Module 4（模型调用：时限与重试、错误分类、花费估算与每日上限、按会话限速）见 [Module 4 导读](docs/module-04-model.md)；Module 5（消息处理运行时：同一会话逐条处理、去重、发送失败如实记录与补发）见 [Module 5 导读](docs/module-05-runtime.md)；Module 6（上下文与长期记忆：全局代号、重启不丢历史、跨会话认人、私聊不进群）见 [Module 6 导读](docs/module-06-context.md)；记忆重做（v2：后台提炼带出处的事实、按地方取用、按人删除）见 [记忆 v2 设计](docs/memory-v2-design.md)；Module 7（群里什么时候说话：被叫到一定回、像在跟它说话的交给模型判断、群里最近的聊天当上文）见 [Module 7 设计](docs/module-07-group-chat-design.md)。下文部分能力描述来自旧原型，不代表实际 QQ 链路已经完成整合。
 
 ## 架构
 
@@ -174,6 +174,8 @@ npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 
 记忆的测试覆盖审核规则、私聊不进群、群里称呼各群通用、换称呼按说出时间、并发写称呼、安静后提炼与进度、失败跳过与花费上限、按说出时间到期、按人删除和运行锁，见 [记忆 v2 设计](docs/memory-v2-design.md) 第 14 节。提炼效果用 `npm run eval:memory` 调真模型评测（约 20 段虚构对话，一次不到 ¥0.01）。
 
+群里什么时候说话的测试覆盖每种情况的判断、只 @ 不说话时等待的各种先后顺序（用假计时器）、`[不回复]` 什么都不发、防刷屏、引用原消息、群里最近的聊天的条数和字数上限，见 [Module 7 设计](docs/module-07-group-chat-design.md) 第 11 节。效果用 `npm run eval:participation` 调真模型评测（13 段虚构对话，一次约 ¥0.1）。
+
 OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`）扮演 SnowLuma，覆盖断线重连、超时、假活、坏数据和发送节流，见 [Module 3 导读](docs/module-03-onebot.md)。
 
 模型调用的测试用一个本地 HTTP 服务扮演 DeepSeek，覆盖空回复、截断、内容过滤、限流、超时、各类错误，以及每日花费上限和按会话限速，见 [Module 4 导读](docs/module-04-model.md)。
@@ -185,6 +187,7 @@ OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`
 ## 诚实的状态标注
 
 - ✅ 已实现并测试：人格引擎、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
+- ✅ 群里什么时候说话（Module 7）：被叫到一定回；只 @ 不说话先等 8 秒，没说话回“干嘛蛙”；接着说和开头叫它交给模型判断，判断不回就一个字都不发；群里最近的聊天只在内存里当上文；同一个人回得太多暂时不理，可配置不理的 QQ 号。
 - ✅ 记忆 v2：后台提炼带出处的事实、按地方取用（私聊不进群）、按说出时间到期、按人删除、运行锁（同一时间只有一个机器人，删除时机器人必须停）。
 - ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。
 - ✅ 模型调用：DeepSeek Responses API，一次回复 60 秒内必有结果、最多两次尝试、错误分类、按官方价格估算花费、每日花费上限、按会话限速（Module 4）。
