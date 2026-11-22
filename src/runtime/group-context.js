@@ -2,12 +2,15 @@
 // 每个群最近的几条消息，奶蛙被叫到、或者要判断回不回时，放进提示当上文。
 // - 只在机器人进程的内存里：不写数据库，不提炼成记忆，重启就没了；
 // - 奶蛙回复过的消息会移走（它们已经在对话历史里），不重复放；
-// - 条数、时间、字数都有上限：群友贴一篇长文，也只占一小段；
+// - 条数、时间、字数都有上限：群友贴一篇长文，也只占一小段；内存里多留一些（keepEntries），放进提示的仍最多 maxEntries 条；
 // - 还用来判断回复时要不要引用原消息（countAfter）。keepText 为 false 时只记谁在什么时候说了话，
 //   不记内容，也不放进提示（GROUP_CONTEXT=off），引用照常判断。
 
 export const GROUP_CONTEXT_DEFAULTS = {
-  maxEntries: 20, // 每个群最多几条
+  maxEntries: 20, // 放进提示最多几条
+  // 每个群在内存里最多留几条。比放进提示的多：等人说完要 7～15 秒，热闹的群里这一轮的话不至于在开始看之前就被挤出去
+  // （被挤出去的话，“群里刚才在聊”整段就没了）。
+  keepEntries: 60,
   maxAgeMs: 10 * 60_000, // 只取多久以内的
   maxEntryChars: 100, // 每条最多几个字，超出截短
   maxTotalChars: 1000, // 整段最多几个字，超出时先丢最早的
@@ -48,6 +51,7 @@ export class GroupContext {
   constructor({ now = () => Date.now(), ...options } = {}) {
     const given = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
     this.options = { ...GROUP_CONTEXT_DEFAULTS, ...given };
+    this.options.keepEntries = Math.max(this.options.keepEntries, this.options.maxEntries);
     this.now = now;
     this.groups = new Map(); // 会话 key -> [{ key, seq, at, sender, parts }]，从早到晚
     this.seq = 0;
@@ -61,7 +65,7 @@ export class GroupContext {
     this.seq += 1;
     const parts = this.options.keepText ? partsOf(message) : [];
     list.push({ key: message.key, seq: this.seq, at: this.now(), sender: message.sender.key, parts });
-    while (list.length > this.options.maxEntries) list.shift();
+    while (list.length > this.options.keepEntries) list.shift();
     this.groups.set(conversationKey, list);
   }
 
@@ -85,7 +89,7 @@ export class GroupContext {
   }
 
   /**
-   * 放进提示的最近聊天：只取 beforeKey 这条消息之前的，从早到晚。它之后才到的不算“刚才在聊”，
+   * 放进提示的最近聊天：只取 beforeKey 这条消息之前的，从早到晚，最多 maxEntries 条。它之后才到的不算“刚才在聊”，
    * 放进来会让模型以为这些话在它前面。beforeKey 这条已经被挤出去时，剩下的都比它晚，返回空。
    * 一轮里有好几句时，beforeKey 是这一轮最后一句，exclude 是这一轮自己的几句（另外交给模型，不重复放）。
    * @param {string} conversationKey
@@ -96,7 +100,8 @@ export class GroupContext {
     const list = this._fresh(conversationKey);
     const skip = new Set(exclude);
     const index = beforeKey === undefined ? list.length : list.findIndex((e) => e.key === beforeKey);
-    return index === -1 ? [] : list.slice(0, index).filter((e) => !skip.has(e.key));
+    if (index === -1) return [];
+    return list.slice(0, index).filter((e) => !skip.has(e.key)).slice(-this.options.maxEntries);
   }
 
   _fresh(conversationKey) {

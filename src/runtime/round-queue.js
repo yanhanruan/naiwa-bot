@@ -7,6 +7,7 @@
 // 开始看由 ConversationQueue 安排：不同会话并行，同时在看的会话数有上限；同一会话里按先后来，
 // “干嘛蛙”这种不调模型的固定回复也排在里面（见 qq-handler.js）。
 // 这里只管攒和排，不碰消息内容：每句是处理器给的一个对象，带上 personKey 就行。
+import { QueueError } from './conversation-queue.js';
 
 // 2026-11-23 冒烟检查后从 3 秒 / 10 秒改成 7 秒 / 15 秒：真人一句一句打，隔 4 秒左右很常见，3 秒会把一段话拆成几轮。
 export const ROUND_DEFAULTS = {
@@ -25,16 +26,18 @@ export class RoundQueue {
    * @param {(round: {id: number, conversationKey: string, items: object[], members: Map<string, object>}) => Promise<void>} options.run
    *   看这一轮（调模型、发送、记录）；自己处理所有错误，不要抛出
    * @param {(error: Error, round: object) => void} options.onRejected 排不进队列（排满了、正在退出）时，这一轮整个不处理
+   * @param {(error: Error) => void} [options.onError] 看的时候出了意外错误（run 不该抛错，抛了就是代码问题）：只报告，不丢别的话
    * @param {() => number} [options.clock] 毫秒时间戳
    * @param {{setTimeout: Function, clearTimeout: Function}} [options.timers]
    * 其余见 ROUND_DEFAULTS。
    */
-  constructor({ queue, run, onRejected, clock = () => Date.now(), timers = { setTimeout, clearTimeout }, ...options }) {
+  constructor({ queue, run, onRejected, onError = () => {}, clock = () => Date.now(), timers = { setTimeout, clearTimeout }, ...options }) {
     const given = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
     this.options = { ...ROUND_DEFAULTS, ...given };
     this.queue = queue;
     this.run = run;
     this.onRejected = onRejected;
+    this.onError = onError;
     this.clock = clock;
     this.timers = timers;
     this.states = new Map(); // 会话 key -> { collecting, submitted, timer }
@@ -134,7 +137,12 @@ export class RoundQueue {
     if (state.submitted) return; // 已经排着了，轮到时会看到它
     state.submitted = true;
     this.queue.run(conversationKey, () => this._start(conversationKey, state)).catch((error) => {
-      // 排不进队列：队列满了或正在退出。这一轮整个不处理。（run 自己不抛错，走到这里的都是排队的错误。）
+      // 不是排队的错误：这一轮已经开始看了，是看的时候出的意外。只报告；这时候正在攒的是下一轮，不能丢。
+      if (!(error instanceof QueueError)) {
+        this.onError(error);
+        return;
+      }
+      // 排不进队列：队列满了或正在退出。这一轮整个不处理。
       state.submitted = false;
       const round = state.collecting;
       state.collecting = null;

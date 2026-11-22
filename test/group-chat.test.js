@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import {
   normalizeOneBotMessage, MemoryInbox, ModelError, NOTICES, EMPTY_MENTION_REPLY, SILENT_MARK, RUNTIME_DEFAULTS,
+  RoundQueue, ConversationQueue,
   Participation, GroupContext, formatGroupContext, isEmptyMention, splitReplies, renderTurn, deletePersonData,
 } from '../src/index.js';
 import { createQQHandler } from '../src/qq-handler.js';
@@ -176,6 +177,15 @@ test('判断：留意 30 秒，期间说几句都看；奶蛙回了再续 30 秒
   assert.equal(next().action, 'ignore', '看了没回：马上不再留意');
   p.noteSent(conv, P, { reopen: false });
   assert.equal(next().action, 'ignore', '固定提示不续留意');
+  // 这一轮开始看以后他又叫了奶蛙：看了没回也不清掉新续的留意
+  p.noteCalled(conv, P);
+  const lookedAt = now;
+  now += 1000;
+  p.noteCalled(conv, P);
+  p.dismiss(conv, P, { lookedAt });
+  assert.equal(next().action, 'judge', '新续的留意还在');
+  p.dismiss(conv, P, { lookedAt: now });
+  assert.equal(next().action, 'ignore');
   // 别的群、别的人不受影响
   p.noteCalled(conv, P);
   assert.equal(p.classify(msg({ user_id: 102, message: '要少糖的' })).action, 'ignore');
@@ -201,14 +211,24 @@ test('读懂回复：[回 u3] 分条，【回U3】、[回u3] 也认；没写回�
   assert.deepEqual(splitReplies(`[回 u3]\n嗯${SILENT_MARK}\n[回 u5]\n好`), [{ alias: 'u5', text: '好' }]);
   assert.deepEqual(splitReplies('[回 某人]\n你好'), [{ alias: '?', text: '你好' }], '写了认不出的人：标成 ?，之后会被丢掉');
   assert.deepEqual(splitReplies('[回 u3]\n  '), []);
+  assert.deepEqual(splitReplies('[回复 u3]\n好\n[回 u5、u7]\n行'), [{ alias: 'u3', text: '好' }, { alias: 'u5', text: '行' }]);
+  assert.deepEqual(splitReplies('【回顾】昨天说的那家店在南门'), [{ alias: null, text: '【回顾】昨天说的那家店在南门' }], '正文碰巧以“【回顾】”开头，不是标记');
+  assert.deepEqual(splitReplies('[回 u3]\n[回顾] 上次说过了'), [{ alias: 'u3', text: '[回顾] 上次说过了' }]);
 });
 
 // —— 群里最近的聊天 ——
 
 test('群里最近的聊天：最多 20 条、10 分钟内；每条超过 100 字截短，整段超过 1000 字先丢最早的；回复过的移走；可以去掉这一轮自己的几句', () => {
   let now = 0;
-  const ctx = new GroupContext({ now: () => now });
   const conv = msg().conversation.key;
+  // 默认内存里留 60 条，放进提示的最多 20 条：这一轮开始看之前，它自己的话不容易被挤出去
+  const roomy = new GroupContext({ now: () => now });
+  for (let i = 1; i <= 25; i += 1) roomy.add(msg({ message_id: i, message: `第${i}条` }));
+  assert.equal(roomy.recent(conv).length, 20);
+  assert.equal(roomy.recent(conv, { beforeKey: KEY(25) })[0].parts[0].text, '第5条', '放进提示的是它前面最近的 20 条');
+  assert.deepEqual(roomy.recent(conv, { beforeKey: KEY(3) }).map((e) => e.parts[0].text), ['第1条', '第2条'], '25 条以内都还在');
+  // 下面用只留 20 条的，测被挤出去的情况
+  const ctx = new GroupContext({ keepEntries: 20, now: () => now });
   for (let i = 1; i <= 25; i += 1) ctx.add(msg({ message_id: i, user_id: 100 + (i % 3), message: `第${i}条` }));
   ctx.add(msg({ message_id: 25, message: '重复收到' }));
   let entries = ctx.recent(conv);
@@ -489,6 +509,97 @@ test('留意：下一轮开始前，模型刚看过、没回的人，他只因�
   assert.deepEqual([await h.status(2), await h.outcome(2)], ['silent', 'model_silent']);
 });
 
+test('开头叫名字也开始留意：奶蛙在想的时候他补的话攒进下一轮；回了他就照常看，没回他就作废', async () => {
+  const h = await setup();
+  const gates = gate(h);
+  const first = h.say({ message: '奶蛙，' });
+  await h.advance(3000);
+  await waitFor(() => gates.length === 1);
+  const more = h.say({ message: '推荐个奶茶' }); // 奶蛙还在想“奶蛙，”
+  await h.advance(3000);
+  gates[0]('在呢');
+  await first;
+  await waitFor(() => gates.length === 2, { what: '回了他：下一轮照常看补的话' });
+  assert.deepEqual(roundLines(h.requests[1]).map((m) => m.messageId), ['2']);
+  gates[1]('杨枝甘露');
+  await more;
+  assert.deepEqual(h.texts(), ['在呢', '杨枝甘露']);
+
+  await h.advance(60_000);
+  const joke = h.say({ user_id: 102, message: '奶蛙，永远的神' });
+  await h.advance(3000);
+  await waitFor(() => gates.length === 3);
+  const chatter = h.say({ user_id: 102, message: '哈哈哈' });
+  await h.advance(3000);
+  gates[2](SILENT_MARK); // 只是在聊这个梗：不回他，他补的话作废，不再多调一次模型
+  await Promise.all([joke, chatter]);
+  assert.equal(h.requests.length, 3);
+  assert.deepEqual([await h.status(4), await h.outcome(4)], ['skipped', 'voided']);
+});
+
+test('留意：看了没回的这一轮还在想的时候，他又 @ 了奶蛙：新续的留意不被清掉，之后不 @ 补的话照样看', async () => {
+  const h = await setup();
+  await h.round({ message: `${AT}推荐个奶茶` }); // 回了：留意他
+  const gates = gate(h);
+  const second = h.say({ message: '哈哈' });
+  await h.advance(3000);
+  await waitFor(() => gates.length === 1, { what: '在看“哈哈”' });
+  await h.advance(1000);
+  const third = h.say({ message: `${AT}再推荐一个` }); // 这一轮开始看以后又叫了奶蛙：续上留意
+  await h.advance(3000);
+  gates[0](SILENT_MARK); // 看了“哈哈”没回他
+  await second;
+  await waitFor(() => gates.length === 2, { what: '在看“再推荐一个”' });
+  const fourth = h.say({ message: '要少糖的' }); // 没 @：靠新续的留意才看得到
+  gates[1]('芋泥波波');
+  await third;
+  await h.advance(3000);
+  await waitFor(() => gates.length === 3, { what: '留意还在，补的话照样看' });
+  assert.deepEqual(roundLines(h.requests[3]).map((m) => m.messageId), ['4']);
+  gates[2](SILENT_MARK);
+  await fourth;
+});
+
+test('一轮：排不进这个群的队列（排满了），这几句记成 dropped，不会卡住', async () => {
+  const h = await setup({ maxPendingPerConversation: 0 });
+  const done = h.say({ message: `${AT}你好` });
+  await h.advance(3000);
+  await done;
+  assert.deepEqual([await h.status(1), await h.outcome(1)], ['dropped', 'queue_full']);
+  assert.equal(h.requests.length, 0);
+});
+
+test('一轮（队列）：排不进队列时这一轮整个不处理；看的时候出了意外错误，只报告，不连累后面攒的话', async () => {
+  const rejected = [];
+  const full = new RoundQueue({
+    queue: new ConversationQueue({ maxPending: 0 }), maxMessages: 1,
+    run: async () => assert.fail('排不进队列，不该开始看'),
+    onRejected: (error, round) => rejected.push([error.code, round.items]),
+  });
+  full.add('c', 'p1', ['a'], { level: 'explicit', reason: 'mention' });
+  await waitFor(() => rejected.length === 1);
+  assert.deepEqual(rejected, [['QUEUE_FULL', ['a']]]);
+  assert.equal(full.memberOf('c', 'p1'), null);
+
+  const seen = [];
+  const errors = [];
+  const rq = new RoundQueue({
+    queue: new ConversationQueue(), maxMessages: 1,
+    run: async (round) => {
+      seen.push(round.items);
+      if (seen.length > 1) return;
+      rq.add('c', 'p2', ['b'], { level: 'explicit', reason: 'mention' }); // 看的时候又来了一句
+      throw new Error('意外');
+    },
+    onRejected: () => assert.fail('不是排队的错误，不该丢话'),
+    onError: (error) => errors.push(error.message),
+  });
+  rq.add('c', 'p1', ['a'], { level: 'explicit', reason: 'mention' });
+  await waitFor(() => seen.length === 2, { what: '后面攒的那句照样看' });
+  assert.deepEqual(seen, [['a'], ['b']]);
+  assert.deepEqual(errors, ['意外']);
+});
+
 test('留意：下一轮里他又明确叫了奶蛙，就不作废', async () => {
   const h = await setup();
   await h.round({ message: `${AT}推荐个奶茶` });
@@ -707,7 +818,7 @@ test('回谁说清楚：奶蛙想回复时群里又有别人说了 2 条以上�
 
 test('回谁说清楚：原消息已经被挤出群里最近的聊天，照样引用；GROUP_CONTEXT=off 也照样判断', async () => {
   for (const keepText of [true, false]) {
-    const h = await setup((hh) => ({ groupContext: new GroupContext({ maxEntries: 3, keepText, now: () => hh.clock }) }));
+    const h = await setup((hh) => ({ groupContext: new GroupContext({ maxEntries: 3, keepEntries: 3, keepText, now: () => hh.clock }) }));
     const gates = gate(h);
     await h.say({ user_id: 104, message: '先聊一句' });
     const first = h.say({ message: `${AT}推荐个奶茶` });

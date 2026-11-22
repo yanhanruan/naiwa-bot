@@ -107,7 +107,8 @@ const SCENARIOS = [
         // 小乙第 1 秒说完，停 7 秒就该开始看（第 8 秒左右），不因为小甲在等补话而多等。
         [r.callStarts[0] < 9, `小乙停了 7 秒就开始看，不等小甲（第 ${r.callStarts[0]?.toFixed(1) ?? '-'} 秒开始调用模型）`],
         [Boolean(joke), '小乙被回了'],
-        [empty && empty.at >= 8, `小甲 8 秒没说话，回了“${EMPTY_MENTION_REPLY}”（第 ${empty?.at.toFixed(1) ?? '-'} 秒；排在小乙那一轮后面）`],
+        // 小乙那一轮和“干嘛蛙”都在第 8 秒左右到点，谁先发都行。
+        [empty && empty.at >= 8, `小甲 8 秒没说话，回了“${EMPTY_MENTION_REPLY}”（第 ${empty?.at.toFixed(1) ?? '-'} 秒）`],
       ];
     },
   },

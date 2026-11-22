@@ -97,8 +97,11 @@ function messageFormat(maxReplies) {
   ].join('\n');
 }
 
-// [回 u3] 这样的一行。写成【回 u3】、[回u3] 也认；写了好几个人的只认第一个。
-const REPLY_LABEL = /^\s*[[【]\s*回\s*([^\]】]*)[\]】]\s*(.*)$/;
+// [回 u3] 这样的标记。写成【回 u3】、[回u3]、[回复 u3] 也认；写了好几个人的只认第一个。
+const REPLY_LABEL = /^\s*[[【]\s*回复?\s*(u\d+)[^\]】\n]{0,10}[\]】]\s*(.*)$/i;
+// 整行只有一个“[回 ……]”、里面认不出代号（例如写了昵称）：当成回谁写错了，这一条丢掉，免得把标记原样发出去。
+// 正文碰巧以“【回顾】”开头的不算，因为同一行后面还有字。
+const BAD_LABEL = /^\s*[[【]\s*回[^\]】\n]{0,12}[\]】]\s*$/;
 
 // 把模型的输出按 [回 …] 分成几条：[{ alias, text }]；alias 为 null 是没写回谁的，'?' 是写了但认不出代号的。
 // 单独一行的 [不回复] 去掉；剩下的里面还夹着 [不回复] 的那条，当成不回。
@@ -107,8 +110,8 @@ export function splitReplies(text) {
   let current = null;
   for (const line of String(text).split('\n')) {
     const label = REPLY_LABEL.exec(line);
-    if (label) {
-      current = { alias: /u\d+/i.exec(label[1])?.[0].toLowerCase() ?? '?', lines: [label[2]] };
+    if (label || BAD_LABEL.test(line)) {
+      current = label ? { alias: label[1].toLowerCase(), lines: [label[2]] } : { alias: '?', lines: [] };
       blocks.push(current);
       continue;
     }
@@ -201,6 +204,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     queue, clock, timers, quietMs: roundQuietMs, maxWaitMs: roundMaxWaitMs, maxMessages: roundMaxMessages,
     run: (round) => processRound(round),
     onRejected: (error, round) => void dropItems(round.items, error),
+    onError: (error) => logger.error('round.failed', { msg: '处理一轮时出现意外错误', error }),
   });
   const format = messageFormat(maxRepliesPerRound);
   let stopping = false;
@@ -378,8 +382,8 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       return;
     }
     if (decision.held) cancelHold(decision.held);
-    // 明确叫了奶蛙：从现在起留意他。
-    if (isGroup && decision.action === 'explicit') participation.noteCalled(conversation.key, sender.key);
+    // 叫了奶蛙（明确叫它，或者开头叫名字）：从现在起留意他。
+    if (isGroup && (decision.action === 'explicit' || decision.reason === 'name')) participation.noteCalled(conversation.key, sender.key);
     log.info('message.accepted', { conversation: conversation.kind, trigger: decision.reason, textChars: message.text.length });
     await item.done;
   }
@@ -529,6 +533,8 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
 
   async function lookAt(round, rlog) {
     const { conversationKey } = round;
+    // 这一轮开始看的时间：在这之后才又叫奶蛙的人，看了没回也不清掉他新续的留意。
+    const lookedAt = clock();
     // 重启以后才认出来的重复消息、等太久的：不看。
     const live = [];
     for (const item of round.items) {
@@ -554,7 +560,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       if (!members.has(item.personKey)) members.set(item.personKey, round.members.get(item.personKey) ?? { level: 'follow_up', reason: 'follow_up' });
     }
     const theirs = (personKey) => live.filter((i) => i.personKey === personKey);
-    for (const item of live) await saveResult(item.message, item.log, { status: 'processing' });
+    await Promise.all(live.map((item) => saveResult(item.message, item.log, { status: 'processing' })));
     const startedAt = Date.now();
     rlog.info('round.started', { messages: live.length, people: members.size, messageKeys: live.map((i) => i.message.key) });
 
@@ -621,13 +627,13 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
         theirs(personKey).at(-1).log.warn('reply.model_silent', { msg: '明确叫它的人，模型却没回他' });
       }
       if (isGroup) {
-        participation.dismiss(conversationKey, personKey);
+        participation.dismiss(conversationKey, personKey, { lookedAt });
         await voidItems(rounds.revoke(conversationKey, personKey));
       }
     }
 
-    // 每句的结果。
-    for (const item of live) {
+    // 每句的结果（各写各的记录，一起写）。
+    await Promise.all(live.map(async (item) => {
       const result = results.get(item.personKey);
       const isLast = item === theirs(item.personKey).at(-1);
       const timing = { trigger: item.trigger, queuedMs: startedAt - item.receivedAt, replyMs, totalMs: Date.now() - item.receivedAt };
@@ -656,7 +662,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
         item.log.warn('message.done', { outcome: 'send_failed', errorCode: error?.code, delivery, ...timing, sendMs, sendAttempts: attempts });
         await conclude(item, { status: 'send_failed', outcome: 'send_failed', errorCode: error?.code, delivery, sendAttempts: attempts });
       }
-    }
+    }));
     rlog.info('round.done', { replies: plan.length, people: replied.length, silent: members.size - targets.size, replyMs, sendMs });
   }
 

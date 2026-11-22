@@ -8,8 +8,8 @@
 //   ignore    不看：群友之间聊天、名字在句子中间、@全体、不理的 QQ 号、同一个人回得太多
 // 这个人是不是在正在攒的“这一轮”里、是不是刚才只 @ 不说话，由处理器判断（它记着），不在这里。
 //
-// “留意”：有人明确叫了奶蛙，或者奶蛙回了他，接下来 watchMs 内留意这个人，他说的话哪怕没 @ 也请模型看一眼。
-// 模型看过他的话、决定不回他，马上不再留意（dismiss），直到他再叫奶蛙。
+// “留意”：有人叫了奶蛙（@、引用、只 @ 不说话、开头叫名字），或者奶蛙回了他，接下来 watchMs 内留意这个人，
+// 他说的话哪怕没 @ 也请模型看一眼。模型看过他的话、决定不回他，马上不再留意（dismiss），直到他再叫奶蛙。
 
 export const PARTICIPATION_DEFAULTS = {
   botNames: ['奶蛙'],
@@ -46,7 +46,7 @@ export class Participation {
     this.botNames = (botNames?.length ? botNames : PARTICIPATION_DEFAULTS.botNames).filter(Boolean);
     this.ignored = new Set(ignoreUsers);
     this.now = now;
-    this.watching = new Map(); // 群+人 -> 留意到什么时候
+    this.watching = new Map(); // 群+人 -> { from: 从什么时候开始留意, until: 留意到什么时候 }
     this.replies = new Map(); // 群+人 -> 最近发给他的时间（升序）
     this.capWarned = new Map(); // 群+人 -> 上一次提醒“回得太多”的时间
   }
@@ -91,13 +91,14 @@ export class Participation {
 
   // 现在是不是在留意这个人。
   isWatched(conversationKey, personKey) {
-    const until = this.watching.get(keyOf(conversationKey, personKey));
-    return until !== undefined && this.now() <= until;
+    const watch = this.watching.get(keyOf(conversationKey, personKey));
+    return watch !== undefined && this.now() <= watch.until;
   }
 
-  // 这个人在群里明确叫了奶蛙（@、引用、只 @ 不说话）：从现在起留意他。
+  // 这个人在群里叫了奶蛙（@、引用、只 @ 不说话、开头叫名字）：从现在起留意他。
+  // 开头叫名字也算：奶蛙还在想“奶蛙，”的时候他补的“推荐个奶茶”才不会丢；模型看了觉得不是在叫它，马上就不留意了。
   noteCalled(conversationKey, personKey) {
-    this.watching.set(keyOf(conversationKey, personKey), this.now() + this.options.watchMs);
+    this._watch(keyOf(conversationKey, personKey));
     this._sweep();
   }
 
@@ -111,13 +112,23 @@ export class Participation {
     const list = (this.replies.get(key) ?? []).filter((at) => now - at < this.options.personCapWindowMs);
     list.push(now);
     this.replies.set(key, list);
-    if (reopen) this.watching.set(key, now + this.options.watchMs);
+    if (reopen) this._watch(key);
     this._sweep();
   }
 
-  // 模型看过他的话、决定不回他：马上不再留意，直到他再叫奶蛙。
-  dismiss(conversationKey, personKey) {
-    this.watching.delete(keyOf(conversationKey, personKey));
+  /**
+   * 模型看过他的话、决定不回他：马上不再留意，直到他再叫奶蛙。
+   * @param {{lookedAt?: number}} [opts] lookedAt：这一轮开始看的时间。他在那之后又叫了奶蛙（留意是新续的），就不清掉。
+   */
+  dismiss(conversationKey, personKey, { lookedAt = Infinity } = {}) {
+    const key = keyOf(conversationKey, personKey);
+    const watch = this.watching.get(key);
+    if (watch && watch.from <= lookedAt) this.watching.delete(key);
+  }
+
+  _watch(key) {
+    const now = this.now();
+    this.watching.set(key, { from: now, until: now + this.options.watchMs });
   }
 
   _capped(key) {
@@ -139,7 +150,7 @@ export class Participation {
   _sweep() {
     if (this.watching.size + this.replies.size < 10_000) return;
     const now = this.now();
-    for (const [key, until] of this.watching) if (until < now) this.watching.delete(key);
+    for (const [key, watch] of this.watching) if (watch.until < now) this.watching.delete(key);
     for (const [key, list] of this.replies) {
       if (!list.some((at) => now - at < this.options.personCapWindowMs)) this.replies.delete(key);
     }
