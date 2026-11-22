@@ -66,6 +66,29 @@ for (const { name, open } of backends) {
     assert.equal(await new ConversationHistory({ db, tenantId: tenant() }).prune(), 0);
   });
 
+  test(`[${name}] 短期历史：默认最近 12 条；开头截到半截（只有回复）的去掉；每条带自己的消息编号；认得出每条回复是回谁的`, async () => {
+    const db = await open();
+    const tenantId = tenant();
+    const history = new ConversationHistory({ db, tenantId });
+    assert.equal(history.maxEntries, 12);
+    const said = (alias, id) => ({ role: 'user', content: JSON.stringify({ sender: { alias }, messageId: id, segments: [] }), messageKey: `m${id}` });
+    // 一轮：u3 说了两句、u5 说了一句；奶蛙回 u3 两条、回 u5 一条。回复挂在他这一轮最后一句上。
+    await history.append(GROUP_A, [
+      said('u3', 1), said('u3', 2), { role: 'assistant', content: '回甲1', messageKey: 'm2' }, { role: 'assistant', content: '回甲2', messageKey: 'm2' },
+      said('u5', 3), { role: 'assistant', content: '回乙', messageKey: 'm3' },
+    ]);
+    const { rows } = await db.query('SELECT message_key FROM conversation_turns WHERE tenant_id = $1 ORDER BY id', [tenantId]);
+    assert.deepEqual(rows.map((r) => r.message_key), ['m1', 'm2', 'm2', 'm2', 'm3', 'm3']);
+    const all = await history.recent(GROUP_A);
+    assert.deepEqual(all.map((t) => t.to ?? null), [null, null, 'u3', 'u3', null, 'u5']);
+    // 只取 3 条时开头是“回甲2”（半截）：去掉
+    const short = await new ConversationHistory({ db, tenantId, maxEntries: 3 }).recent(GROUP_A);
+    assert.deepEqual(short.map((t) => [t.role, t.to ?? null]), [['user', null], ['assistant', 'u5']]);
+    // 认不出的（旧格式、挂的那句不在取到的范围里）就不标
+    await history.append(GROUP_B, [{ role: 'user', content: '不是信封' }, { role: 'assistant', content: '答' }], { messageKey: 'x' });
+    assert.deepEqual(await history.recent(GROUP_B), [{ role: 'user', content: '不是信封' }, { role: 'assistant', content: '答' }]);
+  });
+
   test(`[${name}] 规则印象：群里只按群聊互动算，各群一致；私聊用全部互动；印象里没有任何聊天内容`, async () => {
     const db = await open();
     const fish = await Fish.open({ db, tenantId: tenant() });

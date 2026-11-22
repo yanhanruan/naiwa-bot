@@ -15,8 +15,9 @@ export { ConversationRateLimiter } from './model/rate-limiter.js';
 export { PRICES_CNY, estimateCostCny, isPeak, beijingDate } from './model/pricing.js';
 export { ConversationQueue, QueueError } from './runtime/conversation-queue.js';
 export { MessageInbox, MemoryInbox, MESSAGE_STATUSES } from './runtime/inbox.js';
-export { createQQHandler, RUNTIME_DEFAULTS, NOTICES, EMPTY_MENTION_REPLY, SILENT_MARK } from './qq-handler.js';
+export { createQQHandler, RUNTIME_DEFAULTS, NOTICES, EMPTY_MENTION_REPLY, SILENT_MARK, splitReplies } from './qq-handler.js';
 export { Participation, PARTICIPATION_DEFAULTS, isEmptyMention } from './runtime/participation.js';
+export { RoundQueue, ROUND_DEFAULTS } from './runtime/round-queue.js';
 export { GroupContext, GROUP_CONTEXT_DEFAULTS, formatGroupContext, peopleIn } from './runtime/group-context.js';
 export { PersonAliases } from './context/aliases.js';
 export { ConversationHistory, HISTORY_DEFAULTS } from './context/history.js';
@@ -30,6 +31,6 @@ export { acquireRunLock, serialize, RunLockBusyError, RUN_LOCK_KEY } from './sto
 export * from './schema.js';
 export * from './identity.js';
 export { normalizeOneBotMessage } from './adapters/onebot-message.js';
-export { messageForModel, createAliasBook } from './message.js';
+export { messageForModel, createAliasBook, senderAliasOf } from './message.js';
 export { openStorage, openTestStorage, migrate } from './storage/index.js';
 export { moodLabel } from './character.js';

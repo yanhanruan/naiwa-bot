@@ -68,3 +68,16 @@ export function messageForModel(message, aliasOf) {
     segments: message.segments.map((segment) => segmentForModel(segment, message, aliasOf)),
   });
 }
+
+/**
+ * 原话表里存的信封是谁说的（代号）。不是信封、或者认不出来，返回 null。
+ * @param {string} content messageForModel 的结果
+ */
+export function senderAliasOf(content) {
+  try {
+    const alias = JSON.parse(content)?.sender?.alias;
+    return typeof alias === 'string' && /^u\d+$/.test(alias) ? alias : null;
+  } catch {
+    return null;
+  }
+}

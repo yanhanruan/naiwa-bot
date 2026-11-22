@@ -190,16 +190,18 @@ export const REMEMBERED_TITLE =
 /**
  * 放进回复提示的“你记得的事”。没有事实时返回空字符串（这一节整个省掉）。
  * @param {Array} facts pickFacts 的结果
- * @param {{people: string[], senderKey: string, aliasOf: (key: string) => string, now?: Date}} opts
+ * @param {{people: string[], senderKey?: string, senderKeys?: string[], aliasOf: (key: string) => string, now?: Date}} opts
+ *   senderKeys：这一轮说话的人（标“当前发言者”）；只有一个人时也可以用 senderKey
  */
-export function formatRemembered(facts, { people, senderKey, aliasOf, now = new Date() }) {
+export function formatRemembered(facts, { people, senderKey, senderKeys = [senderKey], aliasOf, now = new Date() }) {
   if (!facts.length) return '';
+  const speaking = new Set(senderKeys);
   const line = (f) => `- ${f.content}（${f.item === 'recent' ? '近况，' : ''}${daysAgo(f.saidAt, now)}）`;
   const lines = [REMEMBERED_TITLE];
   for (const person of [...new Set(people)]) {
     const own = facts.filter((f) => f.subject === person);
     if (!own.length) continue;
-    lines.push(`关于 ${aliasOf(person)}${person === senderKey ? '（当前发言者）' : ''}：`, ...own.map(line));
+    lines.push(`关于 ${aliasOf(person)}${speaking.has(person) ? '（当前发言者）' : ''}：`, ...own.map(line));
   }
   const events = facts.filter((f) => f.item === 'group_event');
   if (events.length) lines.push('这个群里的事：', ...events.map(line));

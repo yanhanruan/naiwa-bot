@@ -12,7 +12,7 @@ import {
 import { daysAgo } from '../src/memory/facts.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { connectPGlite, migrate, openStorage } from '../src/storage/index.js';
-import { testDb, closeTestDb, captureLogger, waitFor, replyToEveryone } from './helpers.js';
+import { testDb, closeTestDb, captureLogger, waitFor, replyToEveryone, INSTANT_ROUNDS } from './helpers.js';
 
 // 记忆 v2（docs/memory-v2-design.md 第 14.1 节）。模型都是假的：给出事先写好的输出，测程序这一侧的规则。
 // 默认在 PGlite 上测；设置 TEST_DATABASE_URL（专用测试库）时也在真实 PostgreSQL 上测：
@@ -209,6 +209,9 @@ test('挑选：只放涉及的人和本群的群事；每人的称呼只留最�
     '关于 u5：', '- 喜欢猫（4 天前）', '这个群里的事：', '- 周六开黑（2 天前）',
   ].join('\n'));
   assert.equal(formatRemembered([], { people: [P], senderKey: P, aliasOf: () => 'u3' }), '');
+  // 一轮里有好几个人说话：每个人都标“当前发言者”
+  const both = formatRemembered(picked.facts, { people: [P, Q], senderKeys: [P, Q], aliasOf: (k) => (k === P ? 'u3' : 'u5') });
+  assert.match(both, /\n关于 u3（当前发言者）：[\s\S]*\n关于 u5（当前发言者）：/);
   // 按北京时间的日期算：北京时间 23:59 和第二天 00:01 差一天
   assert.equal(daysAgo(new Date('2026-11-17T15:59:00Z'), new Date('2026-11-17T16:01:00Z')), '昨天');
   assert.equal(daysAgo(new Date('2026-11-17T16:01:00Z'), new Date('2026-11-17T16:30:00Z')), '今天');
@@ -540,7 +543,7 @@ pgOnly('[PostgreSQL] 持锁连接断开：卡在等模型的普通回复，原�
   });
   const handlerFor = async (w) => createQQHandler({
     fish: await Fish.open({ db, writer: w, tenantId }), brain, getClient: () => client, persona: '测试角色',
-    participation: replyToEveryone(), logger: captureLogger().logger,
+    participation: replyToEveryone(), logger: captureLogger().logger, ...INSTANT_ROUNDS,
   });
   try {
     const stuck = (await handlerFor(writer))(event(101, 1, '他的秘密是蓝色海豚'));

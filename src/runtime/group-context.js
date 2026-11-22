@@ -87,13 +87,16 @@ export class GroupContext {
   /**
    * 放进提示的最近聊天：只取 beforeKey 这条消息之前的，从早到晚。它之后才到的不算“刚才在聊”，
    * 放进来会让模型以为这些话在它前面。beforeKey 这条已经被挤出去时，剩下的都比它晚，返回空。
-   * @returns {Array<{sender: string, at: number, parts: Array}>}
+   * 一轮里有好几句时，beforeKey 是这一轮最后一句，exclude 是这一轮自己的几句（另外交给模型，不重复放）。
+   * @param {string} conversationKey
+   * @param {{beforeKey?: string, exclude?: Iterable<string>}} [opts]
+   * @returns {Array<{key: string, sender: string, at: number, parts: Array}>}
    */
-  recent(conversationKey, { beforeKey } = {}) {
+  recent(conversationKey, { beforeKey, exclude = [] } = {}) {
     const list = this._fresh(conversationKey);
-    if (beforeKey === undefined) return list;
-    const index = list.findIndex((e) => e.key === beforeKey);
-    return index === -1 ? [] : list.slice(0, index);
+    const skip = new Set(exclude);
+    const index = beforeKey === undefined ? list.length : list.findIndex((e) => e.key === beforeKey);
+    return index === -1 ? [] : list.slice(0, index).filter((e) => !skip.has(e.key));
   }
 
   _fresh(conversationKey) {

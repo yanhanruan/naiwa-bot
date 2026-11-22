@@ -6,7 +6,7 @@ import {
   ModelError, MessageInbox, MemoryInbox, RUNTIME_DEFAULTS, FactStore, writeFact, placeOf, Participation,
 } from '../src/index.js';
 import { createQQHandler, NOTICES } from '../src/qq-handler.js';
-import { openFish, testDb, closeTestDb, captureLogger, waitFor, replyToEveryone } from './helpers.js';
+import { openFish, testDb, closeTestDb, captureLogger, waitFor, replyToEveryone, INSTANT_ROUNDS } from './helpers.js';
 
 after(closeTestDb);
 
@@ -163,7 +163,7 @@ test('@ 段保留显示名；模型信封用会话内代号区分发言者和被
   assert.throws(() => messageForModel(message), TypeError);
 });
 
-// 多数入口测试关注身份与记录，不关心群里什么时候说话，默认群里每条都按“一定回”处理；
+// 多数入口测试关注身份与记录，不关心群里什么时候说话，默认群里每条都按“明确叫它”处理，也不等别人说完；
 // realRules: true 时用真正的规则（Module 7 的规则另有测试，见 test/group-chat.test.js）。
 // runtime：传给 createQQHandler 的其他参数（inbox、clock、maxAgeMs……）。
 async function setup(t, { realRules = false, ...runtime } = {}) {
@@ -181,7 +181,7 @@ async function setup(t, { realRules = false, ...runtime } = {}) {
   const options = {
     fish, brain, getClient: () => client, persona: '测试角色',
     now: () => new Date('2026-11-12T00:00:00Z'), logger: logs.logger, clock: fixtureClock,
-    participation: realRules ? undefined : replyToEveryone(), ...runtime,
+    participation: realRules ? undefined : replyToEveryone(), ...INSTANT_ROUNDS, ...runtime,
   };
   const handle = createQQHandler(options);
   // 用同样的参数（可以替换其中几项）再建一个处理器，例如模拟重启、换一个 OneBot 客户端。
@@ -314,20 +314,33 @@ function gatedBrain(h) {
   return gates;
 }
 
-test('同一会话的连续消息逐条处理：后一条看得到前一条的对话，历史不会被覆盖', async (t) => {
+test('同一会话同时只有一轮在看：看的时候来的几句攒成下一轮，一起看；后一轮看得到前一轮的对话', async (t) => {
   const h = await setup(t);
   const gates = gatedBrain(h);
-  const done = [1, 2, 3].map((id) => h.handle(event({ message_id: id, message: `第${id}条` })));
-  for (let i = 0; i < 3; i += 1) {
-    await waitFor(() => gates.length > i, { what: `第 ${i + 1} 次模型调用` });
-    assert.equal(gates.length, i + 1, '同一会话同时只应有一次模型调用');
-    gates[i]();
-  }
-  await Promise.all(done);
-  const history = h.requests[2].filter((m) => m.role !== 'system');
-  assert.deepEqual(history.map((m) => m.role), ['user', 'assistant', 'user', 'assistant', 'user']);
-  assert.deepEqual(history.filter((m) => m.role === 'assistant').map((m) => m.content), ['回复1', '回复2']);
-  assert.deepEqual(sentTexts(h), ['回复1', '回复2', '回复3']);
+  const first = h.handle(event({ message_id: 1, message: '第1条' }));
+  await waitFor(() => gates.length === 1, { what: '第一轮在调用模型' });
+  const rest = [2, 3].map((id) => h.handle(event({ message_id: id, message: `第${id}条` })));
+  await waitFor(() => h.logs.find('message.accepted').length === 3);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(gates.length, 1, '同一会话同时只应有一次模型调用');
+  gates[0]();
+  await first;
+  await waitFor(() => gates.length === 2, { what: '第二轮在调用模型' });
+  gates[1]();
+  await Promise.all(rest);
+  const history = h.requests[1].filter((m) => m.role !== 'system');
+  assert.deepEqual(history.map((m) => m.role), ['user', 'assistant', 'user']);
+  assert.equal(history[1].content, '[回 u1]\n回复1', '奶蛙以前的回复标着回谁');
+  assert.deepEqual(history[2].content.split('\n').map((line) => JSON.parse(line).messageId), ['2', '3'], '第 2、3 条一起看，一行一句');
+  assert.deepEqual(sentTexts(h), ['回复1', '回复2']);
+  // 记录时每句还是单独一行，回复挂在他这一轮最后一句上。
+  const { rows } = await h.fish.db.query(
+    'SELECT role, message_key FROM conversation_turns WHERE tenant_id = $1 ORDER BY id', [h.fish.tenantId],
+  );
+  const key = (id) => `qq:account:900:conversation:group:200:message:${id}`;
+  assert.deepEqual(rows.map((r) => [r.role, r.message_key]), [
+    ['user', key(1)], ['assistant', key(1)], ['user', key(2)], ['user', key(3)], ['assistant', key(3)],
+  ]);
 });
 
 test('不同会话的消息并行处理，互不等待', async (t) => {
@@ -388,21 +401,21 @@ test('太旧的消息不再回复：收到时已超时的直接跳过；排队�
   assert.equal(dropped.messageKey, 'qq:account:900:conversation:group:200:message:3');
 });
 
-test('同一会话排队太多：超过上限的新消息不处理，记为 dropped', async (t) => {
+test('同一会话排队太多：下一轮攒满了还没开始看，再来的不处理，记为 dropped', async (t) => {
   const inbox = new MemoryInbox();
-  const h = await setup(t, { maxPendingPerConversation: 1, inbox });
+  const h = await setup(t, { roundMaxMessages: 2, inbox });
   const gates = gatedBrain(h);
   const first = h.handle(event({ message_id: 1 }));
   await waitFor(() => gates.length === 1);
-  const second = h.handle(event({ message_id: 2 }));
-  await waitFor(() => h.logs.find('message.accepted').length === 2);
-  await h.handle(event({ message_id: 3 })); // 队列已满，立即返回
+  const next = [2, 3].map((id) => h.handle(event({ message_id: id })));
+  await waitFor(() => h.logs.find('message.accepted').length === 3);
+  await h.handle(event({ message_id: 4 })); // 下一轮已经攒满，立即返回
   assert.equal(h.logs.find('message.dropped')[0].reason, 'queue_full');
-  assert.equal((await inbox.get('qq:account:900:conversation:group:200:message:3')).status, 'dropped');
+  assert.equal((await inbox.get('qq:account:900:conversation:group:200:message:4')).status, 'dropped');
   gates[0]();
   await waitFor(() => gates.length === 2);
   gates[1]();
-  await Promise.all([first, second]);
+  await Promise.all([first, ...next]);
   assert.deepEqual(sentTexts(h), ['回复1', '回复2']);
 });
 
@@ -481,7 +494,7 @@ test('重启后记得之前的对话：短期历史和代号都存在数据库�
   const turns = h.requests[1].filter((m) => m.role !== 'system');
   assert.deepEqual(turns.map((m) => m.role), ['user', 'assistant', 'user']);
   assert.equal(JSON.parse(turns[0].content).segments[0].text, '我叫小甲');
-  assert.equal(turns[1].content, '收到');
+  assert.equal(turns[1].content, '[回 u1]\n收到');
   assert.deepEqual(userMessages(h.requests[1]).map((m) => m.sender.alias), ['u1', 'u1']);
 });
 
@@ -617,7 +630,7 @@ test('发送失败不记录：历史和关系都不把未送达的回复当成�
   const client = { sendGroupMsg: async () => { throw new Error('未连接'); } };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色',
-    logger: h.logs.logger, participation: replyToEveryone(), clock: fixtureClock,
+    logger: h.logs.logger, participation: replyToEveryone(), clock: fixtureClock, ...INSTANT_ROUNDS,
   });
   await handle(event({ message: '第一句' }));
   assert.deepEqual(h.logs.find('send.failed').map((e) => e.error.message), ['未连接']);
@@ -666,7 +679,7 @@ test('发送结果未知（超时）：不记录，日志标明 delivery=unknown
   };
   const handle = createQQHandler({
     fish: h.fish, brain: h.brain, getClient: () => client, persona: '测试角色', logger: h.logs.logger, participation: replyToEveryone(),
-    clock: fixtureClock,
+    clock: fixtureClock, ...INSTANT_ROUNDS,
   });
   await handle(event());
   const [failed] = h.logs.find('send.failed');

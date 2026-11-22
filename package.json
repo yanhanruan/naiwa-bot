@@ -14,6 +14,7 @@
     "daemon": "node --env-file=.env ./bin/fish-daemon.mjs",
     "eval:memory": "node --env-file=.env scripts/eval-memory.mjs",
     "eval:participation": "node --env-file=.env scripts/eval-participation.mjs",
+    "sim:group": "node --env-file=.env scripts/sim-group.mjs",
     "db:migrate": "node --env-file=.env -e \"import('./src/storage/index.js').then(async (s) => { const db = await s.openStorage({ migrateOnOpen: false }); console.log(await s.migrate(db)); await db.close(); })\""
   },
   "engines": {

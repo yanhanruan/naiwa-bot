@@ -21,10 +21,13 @@ export async function openFish({ tenantId = `test-${randomUUID()}`, ...opts } = 
   return (await Fish.open({ db, tenantId, ...opts })).start();
 }
 
-// 多数入口测试不关心群里什么时候说话：群里每条消息都按“一定回”处理。Module 7 的规则另有测试（test/group-chat.test.js）。
+// 多数入口测试不关心群里什么时候说话：群里每条消息都按“明确叫它”处理。Module 7 的规则另有测试（test/group-chat.test.js）。
 export function replyToEveryone() {
-  return { classify: () => ({ action: 'reply', reason: 'test' }), isIgnored: () => false, noteCalled() {}, noteSent() {}, giveBack() {} };
+  return { classify: () => ({ action: 'explicit', reason: 'test' }), isIgnored: () => false, noteCalled() {}, noteSent() {}, dismiss() {} };
 }
+
+// 多数入口测试也不关心“攒一轮”：不等别人说完，马上开始看（同一时刻收到的几句仍然一起看）。
+export const INSTANT_ROUNDS = { roundQuietMs: 0 };
 
 // 轮询等待某个条件成立（每 5 毫秒查一次），超时抛错。
 export async function waitFor(check, { timeoutMs = 3000, what = '条件满足' } = {}) {
