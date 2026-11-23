@@ -432,7 +432,7 @@ for (const { name, open } of backends) {
     await env.extractor.runDue();
     assert.deepEqual((await env.allFacts(P)).sort(), ['call_name:希望被叫“甲哥”', 'profile:不吃辣']);
 
-    const expected = { facts: 3, privateTurns: 2, groupTurns: 2, progress: 1, relationships: 1, aliases: 1 };
+    const expected = { facts: 3, privateTurns: 2, groupTurns: 2, progress: 1, relationships: 1, aliases: 1, events: 1 };
     assert.deepEqual(await countPersonData(db, { tenantId: env.tenantId, personKey: P }), expected, '预览只数不删');
     assert.equal((await env.allFacts(P)).length, 2, '预览后什么都没删');
     const counts = await db.transaction((tx) => deletePersonData(tx, { tenantId: env.tenantId, personKey: P }));
@@ -449,6 +449,10 @@ for (const { name, open } of backends) {
     assert.notEqual(await env.progress(GROUP_A), null, '群的提炼进度不动');
     assert.equal((await fish.character.getRelationship(P)).interactions, 0);
     assert.equal((await fish.character.getRelationship(Q)).interactions, 1);
+    const { rows: events } = await db.query(
+      "SELECT target, privacy FROM events WHERE tenant_id = $1 AND kind = 'relationship.touched'", [env.tenantId],
+    );
+    assert.deepEqual(events, [{ target: Q, privacy: `private:${Q}` }], '他的事件删了，别人的还在');
     // 重启后（没有缓存）他再来，拿到新代号
     assert.equal((await new PersonAliases({ db, tenantId: env.tenantId }).resolve([P])).get(P), 'u3');
     await assert.rejects(db.transaction((tx) => deletePersonData(tx, { tenantId: env.tenantId, personKey: GROUP_A })), TypeError);

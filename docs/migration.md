@@ -26,7 +26,7 @@ docker compose logs -f fish
 
 ```bash
 scripts/backup.sh                       # -> backups/naiwa-pg-<时间>.dump（已被 git 忽略）
-scripts/restore.sh backups/xxx.dump --yes   # 先停止机器人再恢复
+scripts/restore.sh backups/xxx.dump --yes   # 先停止机器人再恢复（没停会拒绝；恢复前自动先备份当前数据库）
 ```
 
 ## 日志与监控

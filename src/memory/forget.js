@@ -5,7 +5,8 @@ import { parsePersonKey } from './place.js';
 // - 关于他的事实、他私聊里的事实，以及出处用到他原话的群事；
 // - 和他的私聊原话；他在群里说的原话，以及奶蛙对这些话的回复；
 // - 他私聊会话的提炼进度；
-// - 他的关系记录和代号（代号计数器不回退：他再来会拿到新代号）。
+// - 他的关系记录和代号（代号计数器不回退：他再来会拿到新代号）；
+// - 事件表里和他有关的记录（目前是“和奶蛙互动过”，不含聊天内容）。旧系统留下的旧格式事件（只写号码、不带平台）认不出来。
 // 不删别人说的话里提到他的部分，那些属于别人那一轮对话，7 天后随原话到期删除。
 //
 // countPersonData 只数不删（预览用，只读，机器人运行时也可以用）；deletePersonData 用同样的条件删除。
@@ -23,6 +24,8 @@ function targets({ tenantId, personKey }, person, groupTurnIds) {
     progress: ['memory_progress', PRIVATE_WITH, [tenantId, person.platform, person.id]],
     relationships: ['relationships', 'peer_key = $2', [tenantId, personKey]],
     aliases: ['person_aliases', 'person_key = $2', [tenantId, personKey]],
+    // 关系事件写的是 target = 他、privacy = private:他（src/fish.js 的 touch）；actor 留给以后以他为主语的事件。
+    events: ['events', '(target = $2 OR actor = $2 OR privacy = $3)', [tenantId, personKey, `private:${personKey}`]],
   };
 }
 

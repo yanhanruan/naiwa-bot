@@ -180,7 +180,7 @@ async function run(fish, cmd, args) {
   state                       角色当前情绪与状态
   facts <QQ 号或群号>          列出奶蛙记下的事：内容、出自哪里、原话、什么时候删除（--json 输出原始数据）
   fact-forget <编号>           删除一条事实
-  forget-person <key> --yes   删除这个人的数据（事实、原话、关系、代号）；必须先停机器人。不加 --yes 只预览条数
+  forget-person <key> --yes   删除这个人的数据（事实、原话、关系、代号、事件记录）；必须先停机器人。不加 --yes 只预览条数
   act publish <文本>           发起一次发布意图（默认需审批，返回待审批 id）
   approve <id>                批准某次审批
   deny <id>                   拒绝某次审批

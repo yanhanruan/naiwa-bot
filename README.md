@@ -85,7 +85,7 @@ naiwa-bot/
 ├── migrations/             # 编号的 SQL 迁移（001_init.sql …）
 ├── scripts/
 │   ├── backup.sh           # pg_dump 备份
-│   ├── restore.sh          # pg_restore 恢复
+│   ├── restore.sh          # pg_restore 恢复（机器人没停会拒绝；恢复前先备份当前数据库）
 │   └── eval-memory.mjs     # 提炼效果评测（调用真模型）
 ├── Dockerfile              # Linux/Docker 镜像
 ├── docker-compose.yml      # PostgreSQL（db）+ 可选守护进程

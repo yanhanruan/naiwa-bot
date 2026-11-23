@@ -92,7 +92,7 @@ npm test
 
 ```bash
 scripts/backup.sh                             # -> backups/naiwa-pg-<时间>.dump
-scripts/restore.sh backups/xxx.dump --yes     # 先停止机器人
+scripts/restore.sh backups/xxx.dump --yes     # 先停止机器人（没停会拒绝；恢复前自动先备份当前数据库）
 ```
 
 - 备份用 `pg_dump` 的自定义格式。写完后用 `pg_restore --list` 校验：能读出目录，才算备份成功。
