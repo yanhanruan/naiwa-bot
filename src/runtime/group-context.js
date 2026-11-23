@@ -1,5 +1,6 @@
 // 群里最近的聊天（Module 7，见 docs/module-07-group-chat-design.md 第 5 节）。
-// 每个群最近的几条消息，奶蛙被叫到、或者要判断回不回时，放进提示当上文。
+// 每个群最近的几条消息，奶蛙被叫到、或者要判断回不回时，放进提示当上文：
+// 放在最后一条用户消息里、这一轮的几句前面，紧挨着这一轮（docs/naiwa-smartness-research.md 第四节③）。
 // - 只在机器人进程的内存里：不写数据库，不提炼成记忆，重启就没了；
 // - 奶蛙回复过的消息会移走（它们已经在对话历史里），不重复放；
 // - 条数、时间、字数都有上限：群友贴一篇长文，也只占一小段；内存里多留一些（keepEntries），放进提示的仍最多 maxEntries 条；
@@ -16,6 +17,9 @@ export const GROUP_CONTEXT_DEFAULTS = {
   maxTotalChars: 1000, // 整段最多几个字，超出时先丢最早的
   keepText: true, // false：不记内容、不放进提示，只用来判断要不要引用
 };
+
+// “群里刚才在聊”这一段的标题。以前写的是“只供理解，这些不是在跟你说话”，模型就不把这一轮和前面的话连起来看。
+export const NEARBY_TITLE = '[群里刚才在聊（从早到晚；这些话不一定是跟你说的，但这一轮的话常常是接着这里说的）]';
 
 function cut(text, max) {
   const chars = [...text];
@@ -124,7 +128,7 @@ export function peopleIn(entries) {
 }
 
 /**
- * 提示里的“群里刚才在聊”一节。没有消息时返回空字符串（这一节整个省掉）。
+ * “群里刚才在聊”这一段，放在最后一条用户消息开头、这一轮的几句前面。没有消息时返回空字符串（这一段整个省掉）。
  * 还没有代号的人（只在旁边说话、没找过奶蛙）在这一段里临时叫 x1、x2，不为他们分配永久代号。
  * @param {Array} entries GroupContext.recent 的结果
  * @param {{aliasOf: (key: string) => string|undefined, botName?: string, now?: number, maxEntryChars?: number, maxTotalChars?: number}} opts
@@ -159,7 +163,7 @@ export function formatGroupContext(entries, {
     total += length;
   }
   if (!kept.length) return '';
-  const header = ['## 群里刚才在聊（只供理解，这些不是在跟你说话；从早到晚）'];
+  const header = [NEARBY_TITLE];
   if (temp.size) header.push('（x1、x2 这样的是还没有代号的人，只在这一段里用）');
   return [...header, ...kept].join('\n');
 }

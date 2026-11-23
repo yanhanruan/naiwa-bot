@@ -41,7 +41,8 @@ const NAMES = Object.fromEntries(Object.entries(PEOPLE).map(([name, qq]) => [qq,
 // 写对话时用 @奶蛙、@小乙，发给处理器时换成 QQ 的 @。
 const toCQ = (text) => text.replace(/@奶蛙/g, `[CQ:at,qq=${SELF}]`).replace(/@(小甲|小乙)/g, (_, name) => `[CQ:at,qq=${PEOPLE[name]}]`);
 const has = (text, re) => re.test(text ?? '');
-const NAME_IN_REPLY = /奶蛙/; // 别人没提这个梗，回复里不该自己提
+// 别人没提这个梗，回复里不该自己提“奶蛙”。句尾口癖的“蛙”接在“牛奶”“酸奶”这类词后面（“来杯牛奶蛙”）不算。
+const NAME_IN_REPLY = /(?<![牛酸豆椰鲜羊奶])奶蛙|奶蛙(?=[^\s。！？!?~～…，,、：:；;）)」』（(])/;
 
 // timeline：[第几秒, 谁, 说什么]；tail：最后一句以后再等几秒。
 // checks(r)：返回 [[通过没有, 说明], …]。r.sent：发出的回复；r.msg(i)：第 i 句（从 1 数）的处理结果；r.calls：调用模型几次。
@@ -119,6 +120,7 @@ const SCENARIOS = [
     checks: (r) => [
       [r.sent.length === 1, `只回一次（实际 ${r.sent.length} 次）`],
       [has(r.sent[0]?.text, /甜|糖/), '照顾到“不要太甜”'],
+      [!has(r.sent[0]?.text, /我(平时|平常|一般|最近|就|也|不太|很少|比较|自己)?(爱)?喝|我不怎么喝|喝得(少|不多|最多)|我最近觉得/), '是给他建议，不是说自己喝什么'],
       [!r.msg(1).looked, '“哈哈”不用接（没请模型看这一句）'],
       [!r.sent.some((s) => NAME_IN_REPLY.test(s.text)), '回复里没有自己提“奶蛙”'],
     ],

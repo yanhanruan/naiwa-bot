@@ -66,11 +66,11 @@ for (const { name, open } of backends) {
     assert.equal(await new ConversationHistory({ db, tenantId: tenant() }).prune(), 0);
   });
 
-  test(`[${name}] 短期历史：默认最近 12 条；开头截到半截（只有回复）的去掉；每条带自己的消息编号；认得出每条回复是回谁的`, async () => {
+  test(`[${name}] 短期历史：默认最近 20 条；开头截到半截（只有回复）的去掉；每条带自己的消息编号；认得出每条回复是回谁的`, async () => {
     const db = await open();
     const tenantId = tenant();
     const history = new ConversationHistory({ db, tenantId });
-    assert.equal(history.maxEntries, 12);
+    assert.equal(history.maxEntries, 20);
     const said = (alias, id) => ({ role: 'user', content: JSON.stringify({ sender: { alias }, messageId: id, segments: [] }), messageKey: `m${id}` });
     // 一轮：u3 说了两句、u5 说了一句；奶蛙回 u3 两条、回 u5 一条。回复挂在他这一轮最后一句上。
     await history.append(GROUP_A, [

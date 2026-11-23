@@ -114,8 +114,18 @@ function gate(h) {
 
 const system = (request) => request[0].content;
 const section = (request, title) => system(request).split('\n\n').find((s) => s.startsWith(`## ${title}`));
-// 这一轮的几句（最后一条用户消息，一行一句）。
-const roundLines = (request) => request.at(-1).content.split('\n').map((line) => JSON.parse(line));
+// 交给模型的全部文字（说明书、对话、这一轮）。
+const allText = (request) => request.map((m) => m.content).join('\n');
+// 最后一条用户消息：前面可能先有“群里刚才在聊”，[这一轮] 下面是这一轮的几句（一行一句）。
+const ROUND_MARK = '\n[这一轮]\n';
+const lastContent = (request) => request.at(-1).content;
+const nearbyOf = (request) => (lastContent(request).startsWith('[群里刚才在聊')
+  ? lastContent(request).slice(0, lastContent(request).indexOf(ROUND_MARK)) : undefined);
+const roundLines = (request) => {
+  const content = lastContent(request);
+  const at = content.indexOf(ROUND_MARK);
+  return (at === -1 ? content : content.slice(at + ROUND_MARK.length)).split('\n').map((line) => JSON.parse(line));
+};
 const replyQuote = (id) => ({ type: 'reply', data: { id: String(id) } });
 const text = (t) => ({ type: 'text', data: { text: t } });
 
@@ -255,7 +265,7 @@ test('群里最近的聊天：最多 20 条、10 分钟内；每条超过 100 �
   entries = ctx.recent(conv);
   const aliasOf = (key) => ({ 'qq:user:102': 'u2', 'qq:user:103': 'u3' })[key];
   assert.equal(formatGroupContext(entries, { aliasOf, now }), [
-    '## 群里刚才在聊（只供理解，这些不是在跟你说话；从早到晚）',
+    '[群里刚才在聊（从早到晚；这些话不一定是跟你说的，但这一轮的话常常是接着这里说的）]',
     'u2（2 分钟前）：@奶蛙@u3看[图片][引用了一条消息]',
     `u3（2 分钟前）：${'长'.repeat(99)}…`,
     'u2（刚才）：@全体成员 开会了',
@@ -289,9 +299,9 @@ test('一轮：@ 奶蛙连发三句，别人插话不拖长等待，他停 3 秒
   assert.deepEqual(roundLines(h.requests[0]).map((m) => m.messageId), ['1', '2', '4'], '一行一句，每句带着自己的编号');
   assert.deepEqual(roundLines(h.requests[0]).map((m) => m.sender.alias), ['u1', 'u1', 'u1']);
   assert.equal(section(h.requests[0], '这一轮'), [
-    '## 这一轮', '最后一条用户消息是这一轮的几句话（一行一句，从早到晚）。这一轮里：', 'u1 @ 了你：要回他。',
+    '## 这一轮', '最后一条用户消息先是“群里刚才在聊”，[这一轮] 下面是这一轮的几句话（一行一句，从早到晚）。这一轮里：', 'u1 @ 了你：要回他。',
   ].join('\n'), '只有明确叫它的人：不说“可以不回”');
-  assert.match(section(h.requests[0], '群里刚才在聊'), /x1（刚才）：今天好热$/, '别人的话在“群里刚才在聊”里');
+  assert.match(nearbyOf(h.requests[0]), /x1（刚才）：今天好热$/, '别人的话在“群里刚才在聊”里');
   assert.match(section(h.requests[0], '消息格式'), /每条回复前单独一行写 \[回 u3\]/);
   assert.equal(h.lastOpts.key, KEY(4), '日志关联用这一轮最后一句');
   assert.deepEqual(h.texts(), ['收到']);
@@ -364,7 +374,7 @@ test('一轮：先说一句没叫奶蛙的，再 @ 奶蛙连说两句：后两�
   await Promise.all(done);
   assert.equal(h.requests.length, 1);
   assert.deepEqual(roundLines(h.requests[0]).map((m) => m.messageId), ['2', '3']);
-  const nearby = section(h.requests[0], '群里刚才在聊');
+  const nearby = nearbyOf(h.requests[0]);
   assert.match(nearby, /哈哈/);
   assert.ok(!nearby.includes('不要太甜') && !nearby.includes('喝什么奶茶'), '这一轮自己的几句不重复放');
   assert.ok(!JSON.stringify(await h.turns()).includes('哈哈'), '没叫奶蛙的话不写进原话表');
@@ -424,7 +434,7 @@ test('一轮：开头叫名字（没 @）也开始一轮，交给模型；模型
   await h.round({ message: '奶蛙，永远的神' });
   assert.equal(h.requests.length, 1);
   const round = section(h.requests[0], '这一轮');
-  assert.match(round, /u1 用你的名字开头，但没有 @ 你：可能是在叫你，也可能只是在聊“奶蛙”这个梗。/);
+  assert.match(round, /u1 用你的名字开头，但没有 @ 你：可能是在叫你，也可能只是在聊“奶蛙”这个梗，或者是在回别人（看看群里刚才最后几句是不是有人在找他）。/);
   assert.match(round, /不是在跟你说话，或者没什么可说，就不回他，不要用“？”“哦”之类的话凑一句。谁都不用回时，只输出 \[不回复\]。/);
   assert.equal(h.sent.length, 0);
   assert.deepEqual(await h.turns(), []);
@@ -828,8 +838,8 @@ test('回谁说清楚：原消息已经被挤出群里最近的聊天，照样�
     gates[0]('杨枝甘露');
     await first;
     assert.deepEqual(h.sent[0].message[0], replyQuote(2), `keepText=${keepText}`);
-    if (keepText) assert.match(section(h.requests[0], '群里刚才在聊'), /先聊一句/);
-    else assert.equal(section(h.requests[0], '群里刚才在聊'), undefined, 'off 时不放进提示');
+    if (keepText) assert.match(nearbyOf(h.requests[0]), /先聊一句/);
+    else assert.ok(!allText(h.requests[0]).includes('群里刚才在聊'), 'off 时不放进提示');
   }
 });
 
@@ -851,22 +861,31 @@ test('群里最近的聊天：被叫到时放进提示；回复过的不重复�
   await h.say({ user_id: 102, message: '周末去哪玩' });
   await h.say({ user_id: 103, message: [{ type: 'text', data: { text: '这里' } }, { type: 'image', data: { file: 'x.jpg' } }] });
   await h.round({ message: `${AT}我们刚才在聊什么` });
-  const nearby = section(h.requests[0], '群里刚才在聊');
+  const nearby = nearbyOf(h.requests[0]);
   assert.match(nearby, /\nx1（刚才）：周末去哪玩\nx2（刚才）：这里\[图片\]$/);
   assert.match(nearby, /x1、x2 这样的是还没有代号的人/);
   assert.ok(!nearby.includes('我们刚才在聊什么'), '这一轮自己的话不放');
+  // 放在最后一条用户消息里、紧挨着这一轮，不放在说明书里；标题不再说“这些不是在跟你说话”。
+  assert.ok(!system(h.requests[0]).includes('群里刚才在聊（'), '说明书里没有这一段');
+  assert.match(lastContent(h.requests[0]), /^\[群里刚才在聊（从早到晚；这些话不一定是跟你说的，但这一轮的话常常是接着这里说的）\]\n/);
+  assert.match(lastContent(h.requests[0]), /\n\[这一轮\]\n\{"sender":\{"alias":"u1"[^\n]*我们刚才在聊什么[^\n]*\}$/);
+  assert.match(section(h.requests[0], '这一轮'), /最后一条用户消息先是“群里刚才在聊”，\[这一轮\] 下面是这一轮的几句话/);
+  assert.ok(!allText(h.requests[0]).includes('这些不是在跟你说话'));
   const { rows: aliasRows } = await h.fish.db.query(
     'SELECT person_key FROM person_aliases WHERE tenant_id = $1', [h.fish.tenantId],
   );
   assert.deepEqual(aliasRows.map((r) => r.person_key), [P], '只在旁边说话的人不写进代号表');
   await h.round({ message: `${AT}还有呢` });
-  assert.ok(!system(h.requests[1]).includes('我们刚才在聊什么'), '回复过的已经在对话历史里');
+  assert.ok(!nearbyOf(h.requests[1]).includes('我们刚才在聊什么'), '回复过的已经在对话历史里，不再放进群里刚才在聊');
   assert.ok(!JSON.stringify(await h.turns()).includes('周末去哪玩'), '没叫奶蛙的话不写进原话表');
 
   const off = await setup({ groupContext: null });
   await off.say({ user_id: 102, message: '周末去哪玩' });
   await off.round({ message: `${AT}我们刚才在聊什么` });
-  assert.ok(!system(off.requests[0]).includes('群里刚才在聊'));
+  assert.ok(!allText(off.requests[0]).includes('群里刚才在聊'));
+  assert.ok(!allText(off.requests[0]).includes('周末去哪玩'));
+  assert.equal(roundLines(off.requests[0]).length, 1, '没有群里刚才在聊时，最后一条用户消息只有这一轮的几句');
+  assert.match(section(off.requests[0], '这一轮'), /最后一条用户消息是这一轮的几句话（一行一句，从早到晚）/);
 });
 
 test('群里最近的聊天：只放这一轮最后一句之前的，排队期间别人后来说的不放', async () => {
@@ -882,8 +901,8 @@ test('群里最近的聊天：只放这一轮最后一句之前的，排队期�
   gates[0]('好');
   await first;
   await waitFor(() => gates.length === 2);
-  assert.match(system(h.requests[1]), /明天集合吗/);
-  assert.ok(!system(h.requests[1]).includes('我刚说过'), '后来才说的不当成“刚才在聊”');
+  assert.match(nearbyOf(h.requests[1]), /明天集合吗/);
+  assert.ok(!allText(h.requests[1]).includes('我刚说过'), '后来才说的不当成“刚才在聊”');
   gates[1]('8 点');
   await second;
 });
@@ -903,7 +922,7 @@ test('私聊也走一轮：连发几句等 3 秒一起看；只发图片也回�
   assert.equal(h.sent[0].kind, 'private');
   assert.equal(h.sent[0].message.length, 1, '私聊不引用');
   assert.match(section(h.requests[0], '这一轮'), /u1 在私聊里跟你说话：要回他。/);
-  assert.ok(!system(h.requests[0]).includes('群里的悄悄话'));
+  assert.ok(!allText(h.requests[0]).includes('群里的悄悄话'));
   assert.match(system(h.requests[0]), /uninterpreted 表示尚未解析的非文本内容（例如图片、表情），你看不到它的内容，不要猜/);
   const rules = readFileSync(fileURLToPath(new URL('../persona/social-rules.md', import.meta.url)), 'utf8');
   assert.ok(!rules.includes('识别图片含义'));

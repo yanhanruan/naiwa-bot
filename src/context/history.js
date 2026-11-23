@@ -10,7 +10,9 @@ import { senderAliasOf } from '../message.js';
 const HOUR_MS = 3_600_000;
 
 export const HISTORY_DEFAULTS = {
-  maxEntries: 12, // 一轮可能有好几句，取 12 条以内
+  // 一轮可能有好几句，取 20 条以内。12 条在热闹的群里只够一两分钟，奶蛙会忘了自己刚说过的话
+  // （docs/naiwa-smartness-research.md 第四节⑤）。
+  maxEntries: 20,
   freshMs: 24 * HOUR_MS,
   keepMs: 7 * 24 * HOUR_MS,
 };
