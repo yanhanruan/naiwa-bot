@@ -31,6 +31,10 @@ export { acquireRunLock, serialize, RunLockBusyError, RUN_LOCK_KEY } from './sto
 export * from './schema.js';
 export * from './identity.js';
 export { normalizeOneBotMessage } from './adapters/onebot-message.js';
-export { messageForModel, createAliasBook, senderAliasOf } from './message.js';
+export { messageForModel, createAliasBook, senderAliasOf, faceLabel, contentLabel, quotedText, peopleInQuotes, QUOTE_MAX_CHARS } from './message.js';
+export { QuoteReader, QUOTE_DEFAULTS, belongsTo } from './quotes.js';
+export { RoundLooker, LOOK_DEFAULTS, LOOK_PROMPT } from './images/look.js';
+export { downloadImage, imageType, allowedUrl, DownloadError, DOWNLOAD_DEFAULTS } from './images/download.js';
+export { QQ_FACES, faceName } from './qq-faces.js';
 export { openStorage, openTestStorage, migrate } from './storage/index.js';
 export { moodLabel } from './character.js';

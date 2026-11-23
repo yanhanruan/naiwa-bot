@@ -22,6 +22,9 @@
 //   IGNORE_QQ                不理的 QQ 号（逗号分隔），例如群里别的机器人；他们的话也不进群里最近的聊天
 //   GROUP_CONTEXT            off 不把群里最近的聊天放进提示（默认放：最近 20 条、10 分钟内、整段最多 1000 字，只在内存里）；
 //                            关掉后不记内容，只记谁什么时候说了话，用来判断回复时要不要引用原消息
+// 看懂图片、引用带原文（见 docs/image-understanding-design.md）：
+//   IMAGE_UNDERSTANDING      off 不看图（图片都按“[图片]”处理），默认看；引用带原文不受影响
+//   IMAGE_MODEL              看图用的模型，默认 deepseek-flash（只有它能看图）
 // 运行锁：同一个数据库同时只能有一个机器人在跑；运行中 forget-person 会被拒绝（见 src/storage/run-lock.js）。
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -40,6 +43,7 @@ import { MemoryExtractor } from '../src/memory/extractor.js';
 import { acquireRunLock } from '../src/storage/run-lock.js';
 import { Participation } from '../src/runtime/participation.js';
 import { GroupContext } from '../src/runtime/group-context.js';
+import { RoundLooker } from '../src/images/look.js';
 import { entityKey } from '../src/identity.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { loggerFromEnv } from '../src/log.js';
@@ -95,6 +99,8 @@ if (ignoreQQ.some((id) => !/^\d+$/.test(id))) {
   process.exit(1);
 }
 const groupContextOn = !/^(off|false|0|no)$/i.test(process.env.GROUP_CONTEXT ?? '');
+const imageUnderstanding = !/^(off|false|0|no)$/i.test(process.env.IMAGE_UNDERSTANDING ?? '');
+const imageModel = process.env.IMAGE_MODEL?.trim() || 'deepseek-flash';
 if (reasoningEffort && !/^[a-z]+$/.test(reasoningEffort)) {
   console.error('DEEPSEEK_REASONING_EFFORT 只能是小写字母组成的强度名，例如 none、low、high');
   process.exit(1);
@@ -188,11 +194,23 @@ setInterval(() => void prune(), 24 * 3_600_000).unref();
 // 重启前奶蛙发过的消息：有人引用它们时仍算“叫到了奶蛙”。
 const sentMessageKeys = await inbox.recentSentMessages();
 
+// 看图：flash，不联网、不思考，最多写 150 字；一次最多 20 秒（和查引用、下载共用，见 src/images/look.js）。
+// 花费记在同一本账上，计入每日上限；另外按会话限速（和回复一样的次数，分开计）。
+const looker = new RoundLooker({
+  logger: log,
+  brain: imageUnderstanding ? new DeepSeekBrain({
+    apiKey, model: imageModel, webSearch: false, reasoningEffort: 'none', maxOutputTokens: 300,
+    deadlineMs: 20_000, firstAttemptMs: 15_000, logger: log, dailyBudgetCny, ledger,
+    limiter: new ConversationRateLimiter({ perMinute: ratePerMinute, perHour: ratePerHour }),
+  }) : null,
+});
+
 const handleEvent = createQQHandler({
   fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, aliases, facts, sentMessageKeys,
   botNames,
   participation: new Participation({ botNames, ignoreUsers: ignoreQQ.map((id) => entityKey('qq', 'user', id)) }),
   groupContext: new GroupContext({ keepText: groupContextOn }),
+  looker,
 });
 
 // 后台提炼：便宜的模型，不联网、不思考；花费记在同一本账上，计入每日上限。
@@ -243,6 +261,7 @@ log.info('bot.started', {
   msg: `${fish.character.name} 醒来`, model, webSearch, reasoningEffort, storage: 'PostgreSQL', recordFile: recordFile || undefined,
   dailyBudgetCny: dailyBudgetCny || '不限', ratePerMinute: ratePerMinute || '不限', ratePerHour: ratePerHour || '不限',
   memoryExtraction, memoryModel: memoryExtraction ? memoryModel : undefined,
+  imageUnderstanding, imageModel: imageUnderstanding ? imageModel : undefined,
   memoryQuietMs: memoryExtraction ? memoryQuietMs : undefined,
   botNames, ignoreQQ: ignoreQQ.length || undefined, groupContext: groupContextOn,
 });

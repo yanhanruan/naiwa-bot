@@ -179,6 +179,8 @@ npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 
 群里什么时候说话的测试覆盖每种情况的判断、只 @ 不说话时等待的各种先后顺序（用假计时器）、`[不回复]` 什么都不发、防刷屏、引用原消息、群里最近的聊天的条数和字数上限，见 [Module 7 设计](docs/module-07-group-chat-design.md) 第 11 节。效果用 `npm run eval:participation` 调真模型评测（24 段虚构对话，其中 5 段查“听懂没有”、1 段查“记不记得 14 条以前自己说的话”，一次约 ¥0.2～0.3）。连着发的一起看、两个人同时问、留意 30 秒、只 @ 不说话这些要按时间先后来的，用 `npm run sim:group` 按真实时间间隔模拟两个群友自动跑一遍（真模型，约 1 分钟、¥0.1 以内），见 [Module 7 补充设计](docs/module-07b-burst-merge-design.md)。
 
+看懂图片、小黄脸、引用带原文的测试覆盖挑哪些图（这一轮里的、引用的、叫奶蛙之前 1 分钟内自己发的）、一轮最多 3 张、下载只认 QQ 的图片服务器、引用先核对来源、查引用和看图共用 20 秒到点取消、图片审核拦下时退回“[图片]”，见 [看懂图片设计](docs/image-understanding-design.md) 第 11 节。效果用 `node scripts/make-eval-images.mjs` 画好测试图（不用群友的图）后，`npm run eval:images` 调真模型评测（一次约 ¥0.2）。
+
 OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`）扮演 SnowLuma，覆盖断线重连、超时、假活、坏数据和发送节流，见 [Module 3 导读](docs/module-03-onebot.md)。
 
 模型调用的测试用一个本地 HTTP 服务扮演 DeepSeek，覆盖空回复、截断、内容过滤、限流、超时、各类错误，以及每日花费上限和按会话限速，见 [Module 4 导读](docs/module-04-model.md)。

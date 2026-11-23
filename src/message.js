@@ -1,3 +1,5 @@
+import { faceName } from './qq-faces.js';
+
 /**
  * 入站消息契约 v1。结构化消息与旧 EventStore 的审计事件是不同对象。
  * @typedef {Object} InboundMessage
@@ -37,9 +39,74 @@ export function createAliasBook() {
   };
 }
 
+export const QUOTE_MAX_CHARS = 200; // 引用原文最多几个字（看懂图片设计稿 6.4 节）
+
+function cut(text, max) {
+  const chars = [...text];
+  return chars.length <= max ? text : `${chars.slice(0, max - 1).join('')}…`;
+}
+
+// 打不开的内容按种类写，模型才知道那是什么、能直说打不开；认不出种类的写“[其他内容]”（设计稿 6.4 节）。
+const CONTENT_LABELS = {
+  forward: '[聊天记录]', video: '[视频]', record: '[语音]', file: '[文件]',
+  json: '[卡片]', xml: '[卡片]', share: '[链接]', music: '[音乐]', location: '[位置]', contact: '[名片]', poke: '[戳一戳]',
+};
+export function contentLabel(sourceType) {
+  return Object.hasOwn(CONTENT_LABELS, sourceType) ? CONTENT_LABELS[sourceType] : '[其他内容]';
+}
+
+// QQ 自带的小表情（小黄脸）显示成“[QQ表情：流泪]”，表里没有的显示“[QQ表情]”（设计稿 6.3 节）。
+export function faceLabel(segment) {
+  const name = faceName(segment?.data?.id);
+  return name ? `[QQ表情：${name}]` : '[QQ表情]';
+}
+
+/**
+ * 被引用那条消息的原文（设计稿 6.4 节）：@ 写代号，图写“[图片]”，小黄脸写名字，引用里再套的引用写“[引用了一条消息]”，
+ * 合并转发、视频、语音、文件这些打不开的按种类写（见 contentLabel）；最多 QUOTE_MAX_CHARS 个字。
+ * @param {Array} segments 规范化后的消息段（见 adapters/onebot-message.js）
+ * @param {{aliasOf: (userKey: string) => string|undefined, accountId: string}} opts
+ */
+export function quotedText(segments, { aliasOf, accountId }) {
+  const text = segments.map((s) => {
+    switch (s.type) {
+      case 'text':
+        return s.text;
+      case 'mention':
+        if (s.target === 'all') return '@全体成员';
+        if (s.userId === accountId) return '@你';
+        return `@${aliasOf(s.userKey) ?? '某人'}`;
+      case 'reply':
+        return '[引用了一条消息]';
+      case 'opaque':
+        if (s.sourceType === 'image') return '[图片]';
+        if (s.sourceType === 'face') return faceLabel(s);
+        return contentLabel(s.sourceType);
+      default:
+        return '[其他内容]';
+    }
+  }).join('').replace(/\s+/g, ' ').trim();
+  return cut(text, QUOTE_MAX_CHARS);
+}
+
+// 引用段：查到被引用的那条时，带上谁说的、原文、看过的图（设计稿 6.1、6.4 节）。
+function replyForModel(segment, message, aliasOf, quote) {
+  const out = { type: 'reply', messageId: segment.messageId };
+  if (!quote) return out;
+  if (quote.fromSelf) out.fromYou = true;
+  if (quote.status !== 'ok') return out;
+  if (!quote.fromSelf) out.from = aliasOf(quote.authorKey) ?? '某人';
+  const text = quote.text !== undefined
+    ? cut(String(quote.text).replace(/\s+/g, ' ').trim(), QUOTE_MAX_CHARS)
+    : quotedText(quote.segments ?? [], { aliasOf, accountId: message.account.id });
+  if (text) out.text = text;
+  if (quote.images?.length) out.images = quote.images;
+  return out;
+}
+
 // 模型只收到显示所需的字段。昵称和消息正文仍是用户输入，不授予任何权限。
 // 会话信息每轮相同，放在系统提示里；同一会话内消息 ID 已唯一，不重复发送完整 key。
-function segmentForModel(segment, message, aliasOf) {
+function segmentForModel(segment, index, message, aliasOf, extra) {
   switch (segment.type) {
     case 'mention': {
       if (segment.target === 'all') return { type: 'mention', target: 'all' };
@@ -48,9 +115,17 @@ function segmentForModel(segment, message, aliasOf) {
       return segment.name ? { ...mention, name: segment.name } : mention;
     }
     case 'reply':
-      return { type: 'reply', messageId: segment.messageId };
-    case 'opaque':
+      return replyForModel(segment, message, aliasOf, extra?.quote);
+    case 'opaque': {
+      // 看过的图写成描述；小黄脸查表写名字；其余（没看、没看成的图，语音、视频……）仍是“未解析”。
+      const description = segment.sourceType === 'image' ? extra?.images?.get(index) : undefined;
+      if (description) return { type: 'image', description };
+      if (segment.sourceType === 'face' && !segment.invalid) {
+        const name = faceName(segment.data?.id);
+        return name ? { type: 'face', name } : { type: 'face' };
+      }
       return { type: 'uninterpreted', sourceType: segment.sourceType };
+    }
     default:
       return segment;
   }
@@ -59,14 +134,33 @@ function segmentForModel(segment, message, aliasOf) {
 /**
  * @param {InboundMessage} message
  * @param {(userKey: string) => string} aliasOf 本会话的代号簿，见 createAliasBook()
+ * @param {{images?: Map<number, string>, quote?: object|null, recentImages?: string[]}} [extra]
+ *   查引用、看图的结果（见 src/images/look.js）：第几段的图的描述、引用的那条、叫奶蛙之前自己发的图的描述
  */
-export function messageForModel(message, aliasOf) {
+export function messageForModel(message, aliasOf, extra = null) {
   if (typeof aliasOf !== 'function') throw new TypeError('messageForModel: aliasOf is required');
-  return JSON.stringify({
+  const envelope = {
     sender: { alias: aliasOf(message.sender.key), name: message.sender.displayName },
     messageId: message.id,
-    segments: message.segments.map((segment) => segmentForModel(segment, message, aliasOf)),
-  });
+    segments: message.segments.map((segment, index) => segmentForModel(segment, index, message, aliasOf, extra)),
+  };
+  if (extra?.recentImages?.length) envelope.recentImages = extra.recentImages;
+  return JSON.stringify(envelope);
+}
+
+/**
+ * 引用里要用代号的人：被引用那条的作者和那条里 @ 的人（见 src/images/look.js 的结果）。
+ * @param {Iterable<{quote?: object|null}>} extras
+ */
+export function peopleInQuotes(extras) {
+  const keys = new Set();
+  for (const extra of extras) {
+    const quote = extra?.quote;
+    if (quote?.status !== 'ok') continue;
+    if (quote.authorKey) keys.add(quote.authorKey);
+    for (const s of quote.segments ?? []) if (s.type === 'mention' && s.target === 'user') keys.add(s.userKey);
+  }
+  return [...keys];
 }
 
 /**

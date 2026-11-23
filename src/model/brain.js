@@ -126,18 +126,26 @@ export class DeepSeekBrain {
 
   /**
    * 生成一条回复。成功返回非空文字；失败抛 ModelError。
-   * @param {Array<{role: string, content: string}>} messages system 消息合并成 instructions，其余作为 input
+   * @param {Array<{role: string, content: string|Array}>} messages system 消息合并成 instructions，其余作为 input
+   *   （content 可以是 Responses API 的内容块数组，例如看图时的 input_text、input_image）
    * @param {object} [opts]
    * @param {string} [opts.key] 消息 key，只用于日志关联
    * @param {string} [opts.conversationKey] 会话 key，用于按会话限速和用量统计
+   * @param {string} [opts.safetyCheck] DeepSeek 内容安全审核的级别（看图时传 'high'）；不传就不带这个参数
+   * @param {number} [opts.deadline] 外面给的截止时间（Date.now() 的毫秒数）：每次尝试都不超过它，到点不再重试
+   * @param {AbortSignal} [opts.signal] 外面的取消信号：取消时停下正在等的请求，不再重试
    */
-  async chat(messages, { key, conversationKey, webSearch = this.webSearch, maxOutputTokens = this.maxOutputTokens } = {}) {
+  async chat(messages, {
+    key, conversationKey, webSearch = this.webSearch, maxOutputTokens = this.maxOutputTokens,
+    safetyCheck = null, deadline: outerDeadline = Infinity, signal = null,
+  } = {}) {
     const log = key ? this.log.child({ messageKey: key }) : this.log;
     const startedAt = Date.now();
+    if (signal?.aborted) throw new ModelError('TIMEOUT'); // 外面已经到点：一次都不调
     await this._checkBudget(log);
     this._checkRate(log, conversationKey);
 
-    const deadline = startedAt + this.options.deadlineMs;
+    const deadline = Math.min(startedAt + this.options.deadlineMs, outerDeadline);
     const plan = [
       { webSearch, reasoningEffort: this.reasoningEffort },
       { webSearch: false, reasoningEffort: 'none' },
@@ -147,14 +155,19 @@ export class DeepSeekBrain {
     for (let i = 0; i < plan.length; i += 1) {
       if (lastError) {
         const delayMs = this._retryDelay(lastError);
-        if (deadline - Date.now() - delayMs < this.options.minAttemptMs) break;
+        if (signal?.aborted || deadline - Date.now() - delayMs < this.options.minAttemptMs) break;
         if (delayMs) await sleep(delayMs);
+      }
+      // 外面到点了（取消了，或者截止时间已过）：不再发请求。
+      if (signal?.aborted || deadline - Date.now() <= 0) {
+        lastError ??= new ModelError('TIMEOUT');
+        break;
       }
       const timeoutMs = Math.max(1, Math.min(i === 0 ? this.options.firstAttemptMs : Infinity, deadline - Date.now()));
       const attemptStartedAt = Date.now();
       try {
         const result = await this._attempt(messages, {
-          ...plan[i], n: i + 1, timeoutMs, maxOutputTokens, conversationKey, log, spent,
+          ...plan[i], n: i + 1, timeoutMs, maxOutputTokens, conversationKey, log, spent, safetyCheck, signal,
         });
         log.info('model.done', {
           attempts: i + 1,
@@ -186,32 +199,37 @@ export class DeepSeekBrain {
     return 0; // 超时、空回复、数据无法识别：马上换一种方式再试
   }
 
-  _body(messages, { webSearch, reasoningEffort, maxOutputTokens }) {
+  _body(messages, { webSearch, reasoningEffort, maxOutputTokens, safetyCheck }) {
     const instructions = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n\n');
     const input = messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content }));
     const body = { model: this.model, input, max_output_tokens: maxOutputTokens };
+    if (safetyCheck) body.safety_check = { level: safetyCheck };
     if (instructions) body.instructions = instructions;
     if (webSearch) body.tools = [{ type: 'web_search' }];
     if (reasoningEffort) body.reasoning = { effort: reasoningEffort };
     return body;
   }
 
-  async _attempt(messages, { webSearch, reasoningEffort, maxOutputTokens, timeoutMs, n, conversationKey, log, spent }) {
+  async _attempt(messages, {
+    webSearch, reasoningEffort, maxOutputTokens, timeoutMs, n, conversationKey, log, spent, safetyCheck = null, signal = null,
+  }) {
     const at = this.now();
     const fetchImpl = this.fetchImpl;
     let res;
     let raw;
+    // 同时管住等响应头和读响应体；外面取消时一起停。
+    const timeout = AbortSignal.timeout(timeoutMs);
     try {
       res = await fetchImpl(`${this.baseUrl}/v1/responses`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${this.apiKey}` },
-        body: JSON.stringify(this._body(messages, { webSearch, reasoningEffort, maxOutputTokens })),
-        signal: AbortSignal.timeout(timeoutMs), // 同时管住等响应头和读响应体
+        body: JSON.stringify(this._body(messages, { webSearch, reasoningEffort, maxOutputTokens, safetyCheck })),
+        signal: signal ? AbortSignal.any([timeout, signal]) : timeout,
       });
       raw = await res.text();
     } catch (error) {
-      if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
-        // 请求已经发出，对方可能已经在生成并计费，只是我们拿不到用量：按估算入账，宁可多算。
+      if (signal?.aborted || error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+        // 请求已经发出（包括被外面取消的），对方可能已经在生成并计费，只是我们拿不到用量：按估算入账，宁可多算。
         await this._recordUsage({ at, conversationKey, usage: null, log, spent });
         throw new ModelError('TIMEOUT');
       }

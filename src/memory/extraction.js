@@ -51,7 +51,13 @@ function segmentText(segment) {
       if (segment.target === 'all') return '@全体成员';
       return ALIAS.test(segment.alias ?? '') ? `@${segment.alias}` : '@某人';
     case 'reply':
-      return '[引用了一条消息]'; // 信封里只有被引用消息的编号，被引用的内容进不了提炼
+      // 信封里的引用可能带着被引用那句的原文（看懂图片设计稿 6.4 节），提炼一律不看：被引用的话不能记成引用的人说的。
+      return '[引用了一条消息]';
+    case 'image':
+      return '[图片]'; // 看过的图带着模型写的描述，不是他说的话，提炼不看（设计稿 6.2 节）
+    case 'face':
+      return typeof segment.name === 'string' && segment.name && [...segment.name].length <= 20
+        ? `[QQ表情：${segment.name}]` : '[QQ表情]';
     case 'uninterpreted':
       return segment.sourceType === 'image' ? '[图片]' : '[其他内容]';
     default:

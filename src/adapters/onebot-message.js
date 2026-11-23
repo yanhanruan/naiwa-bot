@@ -53,7 +53,8 @@ function knownSegment(type, data, conversation) {
   }
 }
 
-function normalizeSegments(message, conversation) {
+// 也用来解析 get_msg 取回的被引用消息（src/quotes.js）。
+export function normalizeSegments(message, conversation) {
   const input = typeof message === 'string' ? parseCQ(message) : message;
   if (!Array.isArray(input)) throw new TypeError('message: expected an array or CQ string');
   return input.map((segment) => {

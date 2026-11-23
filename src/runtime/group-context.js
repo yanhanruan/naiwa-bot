@@ -7,6 +7,8 @@
 // - 还用来判断回复时要不要引用原消息（countAfter）。keepText 为 false 时只记谁在什么时候说了话，
 //   不记内容，也不放进提示（GROUP_CONTEXT=off），引用照常判断。
 
+import { faceLabel, contentLabel } from '../message.js';
+
 export const GROUP_CONTEXT_DEFAULTS = {
   maxEntries: 20, // 放进提示最多几条
   // 每个群在内存里最多留几条。比放进提示的多：等人说完要 7～15 秒，热闹的群里这一轮的话不至于在开始看之前就被挤出去
@@ -27,6 +29,7 @@ function cut(text, max) {
 }
 
 // 把一条入站消息拆成可显示的几段；@ 的人先只记 key，显示时再换成代号。
+// 图片另外记下消息段里的地址、文件名、说明（不下载），给“叫奶蛙之前自己发的图”用（看懂图片设计稿第 3 节）。
 function partsOf(message) {
   return message.segments.map((s) => {
     switch (s.type) {
@@ -39,7 +42,9 @@ function partsOf(message) {
       case 'reply':
         return { type: 'text', text: '[引用了一条消息]' };
       case 'opaque':
-        return { type: 'text', text: s.sourceType === 'image' ? '[图片]' : '[其他内容]' };
+        if (s.sourceType === 'image') return { type: 'text', text: '[图片]', image: s.invalid ? null : s.data };
+        if (s.sourceType === 'face') return { type: 'text', text: faceLabel(s) };
+        return { type: 'text', text: contentLabel(s.sourceType) }; // [聊天记录]、[视频]……认不出的是[其他内容]
       default:
         return { type: 'text', text: '[其他内容]' };
     }
@@ -106,6 +111,23 @@ export class GroupContext {
     const index = beforeKey === undefined ? list.length : list.findIndex((e) => e.key === beforeKey);
     if (index === -1) return [];
     return list.slice(0, index).filter((e) => !skip.has(e.key)).slice(-this.options.maxEntries);
+  }
+
+  /**
+   * 某人在 beforeKey 这句之前 withinMs 内自己在这个群发的图（消息段里的 data：地址、文件名、说明），最近的在前。
+   * 给“叫奶蛙之前 1 分钟内自己发的图”用；exclude 是这一轮自己的几句（另外看，不重复）。beforeKey 这句找不到时返回空。
+   */
+  imagesBefore(conversationKey, { personKey, beforeKey, withinMs, exclude = [] }) {
+    const list = this._fresh(conversationKey);
+    const anchor = list.find((e) => e.key === beforeKey);
+    if (!anchor) return [];
+    const skip = new Set(exclude);
+    const refs = [];
+    for (const e of list) {
+      if (e.seq >= anchor.seq || e.sender !== personKey || skip.has(e.key) || anchor.at - e.at > withinMs) continue;
+      for (const p of e.parts) if (p.image) refs.push(p.image);
+    }
+    return refs.reverse();
   }
 
   _fresh(conversationKey) {
