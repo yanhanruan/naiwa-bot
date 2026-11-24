@@ -133,9 +133,10 @@ PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结�
 | 表 | 内容 |
 | --- | --- |
 | `events` | 统一事件（审计/回溯，只追加） |
-| `character_state` | 情绪、创建时间 |
+| `character_state` | 角色创建时间 |
+| `mood_state` | 奶蛙的心情：今天的基调、日内起伏（每个租户一行，不按群、不按人，见 [Module 8 设计稿](module-08-mood-design.md)） |
 | `interests` | 兴趣及权重 |
-| `relationships` | 每个人的关系：互动次数（另记群聊次数）、好感度、备注 |
+| `relationships` | 每个人的关系：互动次数（另记群聊次数）、第一次见面时间（不记好感） |
 | `model_usage` | 模型用量账本：按北京时间的日期、会话、模型累计调用次数、token、搜索次数和估算花费（不存内容） |
 | `inbound_messages` | 入站消息记录：每条叫到奶蛙的消息的处理状态和结果，用于去重（不存内容，保留 30 天） |
 | `person_aliases` / `person_alias_counters` | 全局、持久的代号：每个人一个 u 编号 |

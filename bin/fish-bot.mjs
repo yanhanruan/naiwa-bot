@@ -46,6 +46,7 @@ import { GroupContext } from '../src/runtime/group-context.js';
 import { RoundLooker } from '../src/images/look.js';
 import { entityKey } from '../src/identity.js';
 import { createQQHandler } from '../src/qq-handler.js';
+import { loadMoodTexts } from '../src/mood/prompt.js';
 import { loggerFromEnv } from '../src/log.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -109,6 +110,8 @@ if (reasoningEffort && !/^[a-z]+$/.test(reasoningEffort)) {
 const persona = existsSync(personaPath) ? readFileSync(personaPath, 'utf8') : '你是一只小青蛙。';
 const socialRulesPath = process.env.FISH_SOCIAL_RULES ?? join(root, 'persona', 'social-rules.md');
 const socialRules = existsSync(socialRulesPath) ? readFileSync(socialRulesPath, 'utf8') : '';
+// 每一档心情的说法和口癖（Module 8）：persona/moods/<档>.md，平常没有文件。
+const moodTexts = loadMoodTexts(process.env.FISH_MOODS_DIR ?? join(root, 'persona', 'moods'));
 // 连不上数据库会直接抛错退出，不会以空记忆启动。迁移等拿到运行锁以后再跑（见下）。
 const db = await openStorage({ migrateOnOpen: false });
 // 运行锁：拿不到说明已有机器人在跑（或者 forget-person 正在删数据），拒绝启动。
@@ -211,6 +214,8 @@ const handleEvent = createQQHandler({
   participation: new Participation({ botNames, ignoreUsers: ignoreQQ.map((id) => entityKey('qq', 'user', id)) }),
   groupContext: new GroupContext({ keepText: groupContextOn }),
   looker,
+  mood: fish.mood,
+  moodTexts,
 });
 
 // 后台提炼：便宜的模型，不联网、不思考；花费记在同一本账上，计入每日上限。

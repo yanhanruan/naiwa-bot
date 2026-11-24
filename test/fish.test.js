@@ -5,27 +5,23 @@ import { openFish, closeTestDb } from './helpers.js';
 
 after(closeTestDb);
 
-test('验收1：连续对话保持稳定人格，情绪随事件自然变化', async () => {
+test('验收1：连续对话保持稳定人格；收到事件只记录，不再按规则改心情（心情见 test/mood.test.js）', async () => {
   const fish = await openFish({
     name: '小渔',
     persona: { core: '温柔好奇的小鱼', style: '爱用波浪线' },
   });
-
   const before = await fish.bridge.getCharacterState();
-  const v0 = before.mood.valence;
-
   await fish.reactTo({
     platform: 'qq',
     kind: 'message.received',
     actor: 'peerA',
-    payload: { text: '你好呀', sentiment: 'positive', mentionsSelf: true },
+    payload: { text: '你好呀', mentionsSelf: true },
   });
-
   const after = await fish.bridge.getCharacterState();
   assert.equal(after.name, '小渔');
   assert.equal(after.persona.core, '温柔好奇的小鱼');
-  assert.ok(after.mood.valence > v0, '正向事件后 valence 应上升');
   assert.equal(after.persona.style, '爱用波浪线');
+  assert.deepEqual(after.mood, before.mood);
   await fish.stop();
 });
 
@@ -101,8 +97,8 @@ test('主动行为受总开关控制，关闭时不触发', async () => {
 test('验收8：Character OS Bridge 返回结构化角色状态', async () => {
   const fish = await openFish();
   const st = await fish.bridge.getStatus();
-  assert.equal(typeof st.character.mood.valence, 'number');
-  assert.equal(typeof st.character.mood.label, 'string');
+  assert.ok(['很低落', '有点低落', '平常', '开心', '很开心'].includes(st.character.mood.now));
+  assert.equal(st.character.mood.ripple, 0);
   assert.equal(typeof st.policy.proactiveEnabled, 'boolean');
   assert.equal(typeof st.events.count, 'number');
   await fish.stop();
@@ -110,11 +106,13 @@ test('验收8：Character OS Bridge 返回结构化角色状态', async () => {
 
 test('关系记忆：互动被记录且不影响他人', async () => {
   const fish = await openFish();
-  await fish.touch('peerA', { name: '小明', deltaSentiment: 0.2, note: '很友好' });
-  await fish.touch('peerA', { deltaSentiment: 0.1 });
+  await fish.touch('peerA', { name: '小明' });
+  await fish.touch('peerA', {});
   const rel = await fish.character.getRelationship('peerA');
   assert.equal(rel.interactions, 2);
-  assert.ok(rel.sentiment > 0);
+  assert.equal(rel.name, '小明');
+  assert.equal(rel.sentiment, undefined, '不再记好感');
+  assert.equal(await fish.events.count({ kind: 'relationship.touched' }).catch(() => 0), 0);
   const st = await fish.bridge.getCharacterState();
   assert.ok(st.relationships.some((r) => r.peerId === 'peerA'));
   await fish.stop();

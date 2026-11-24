@@ -1,5 +1,5 @@
 import { validateCharacterState } from './schema.js';
-import { moodLabel } from './character.js';
+import { moodName } from './mood/mood.js';
 
 // Character OS Bridge：对外暴露结构化角色状态 / 意图执行接口。
 export class Bridge {
@@ -7,9 +7,11 @@ export class Bridge {
     this.fish = fish;
   }
 
-  // 查询角色当前情绪与状态（结构化，符合 schema）。
+  // 查询角色当前心情与状态（结构化，符合 schema）。心情见 src/mood/：今天的基调、现在是哪一档、起伏。
   async getCharacterState() {
-    const st = await this.fish.character.state();
+    const m = await this.fish.mood.current();
+    const mood = { now: moodName(m.level), base: moodName(m.base), manual: m.manual, ripple: Number(m.ripple.toFixed(2)), day: m.day };
+    const st = { ...(await this.fish.character.state()), mood };
     const v = validateCharacterState(st);
     if (!v.ok) throw new Error(`invalid character state: ${v.errors.join('; ')}`);
     return st;
@@ -28,33 +30,6 @@ export class Bridge {
       events: { count: await this.fish.events.count() },
       platforms: this.fish.connectedPlatforms ?? [],
     };
-  }
-
-  // 输出可供 Character OS 使用的结构化情绪/动作指令。
-  async express(intent = {}) {
-    const c = this.fish.character;
-    const moodVector = await c.getMood();
-    const mood = moodLabel(moodVector);
-    return {
-      intent: intent.intent ?? 'chat',
-      mood,
-      moodVector,
-      style: c.persona.style,
-      tone: c.persona.tone,
-      expression: this._render(intent, mood),
-    };
-  }
-
-  _render(intent, mood) {
-    const moodDecor = {
-      '兴奋': '（摆摆尾巴，眼睛亮晶晶）',
-      '开心': '（吐了个小泡泡）',
-      '低落': '（轻轻沉到水底，尾巴没精打采）',
-      '有点闷': '（慢慢游了一圈）',
-      '困困的': '（打了个哈欠，泡泡都变小了）',
-      '平静': '（悠悠地摆着鳍）',
-    }[mood] ?? '';
-    return `${moodDecor}${intent.text ?? ''}`;
   }
 
   // 执行一个意图（统一工具调用接口）。写操作走审批，读/回复直接执行。

@@ -37,4 +37,5 @@ export { RoundLooker, LOOK_DEFAULTS, LOOK_PROMPT } from './images/look.js';
 export { downloadImage, imageType, allowedUrl, DownloadError, DOWNLOAD_DEFAULTS } from './images/download.js';
 export { QQ_FACES, faceName } from './qq-faces.js';
 export { openStorage, openTestStorage, migrate } from './storage/index.js';
-export { moodLabel } from './character.js';
+export { Mood, MOOD_LEVELS, MOOD_DEFAULTS, moodDay, moodName, drawBase } from './mood/mood.js';
+export { loadMoodTexts, moodSection, extractMoodTags, MOOD_TAG_RULE } from './mood/prompt.js';

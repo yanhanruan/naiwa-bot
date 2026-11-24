@@ -3,6 +3,7 @@ import { CharacterCore } from './character.js';
 import { Policy } from './policy.js';
 import { Scheduler } from './scheduler.js';
 import { Bridge } from './bridge.js';
+import { Mood } from './mood/mood.js';
 
 // 数字生命顶层编排：把人格、事件、策略、调度、Bridge 组装成一条「鱼」。
 // 平台适配器通过 reactTo / touch / act 与鱼交互。记忆（事实）见 src/memory/。
@@ -23,6 +24,7 @@ export class Fish {
     this.tenantId = tenantId;
     this.events = new EventStore(db, { tenantId });
     this.character = new CharacterCore({ db, writer: this.writer, tenantId, name, persona });
+    this.mood = new Mood({ db, tenantId }); // 奶蛙的心情（Module 8）：全局一份
     this.policy = new Policy(policy);
     this.scheduler = new Scheduler({ policy: this.policy });
     this.bridge = new Bridge(this);
@@ -60,9 +62,7 @@ export class Fish {
 
   // 平台适配器把入站消息转成统一事件交给这里。
   async reactTo(event) {
-    const ev = await this.events.append(event);
-    await this.character.perceive(ev);
-    return ev;
+    return this.events.append(event);
   }
 
   // 只读内容摄取：把平台适配器拉到的内容转成统一事件（不产生任何写操作）。
@@ -83,16 +83,9 @@ export class Fish {
     return events;
   }
 
+  // 记一次互动（次数、第一次见面时间）。不记好感，也不往事件表写（Module 8：不按人存情绪）。
   async touch(peerId, opts) {
-    const rel = await this.character.touchRelationship(peerId, opts);
-    await this.events.append({
-      kind: 'relationship.touched',
-      platform: 'fish-os',
-      target: peerId,
-      payload: { sentiment: rel.sentiment, interactions: rel.interactions },
-      privacy: `private:${peerId}`,
-    });
-    return rel;
+    return this.character.touchRelationship(peerId, opts);
   }
 
   // 主动行为：注册周期性任务；只在总开关打开时由 tick 触发。

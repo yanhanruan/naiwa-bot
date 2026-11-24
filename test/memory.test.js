@@ -428,6 +428,10 @@ for (const { name, open } of backends) {
     await env.say(GROUP_A, Q, '@u1 你来吗', { segments: [{ type: 'mention', alias: 'u1' }, { type: 'text', text: ' 你来吗' }] });
     await fish.touch(P, { inGroup: true });
     await fish.touch(Q, { inGroup: true });
+    // 2026-11-24 起 touch 不再写事件（Module 8）；以前写下的 relationship.touched 还在库里，照样要删。
+    for (const who of [P, Q]) {
+      await fish.events.append({ kind: 'relationship.touched', platform: 'fish-os', target: who, payload: {}, privacy: `private:${who}` });
+    }
     // 群 A 那段的编号（每句后面跟一句奶蛙的回复）：#1 u1 甲哥、#3 u2 开黑、#5 u2 猫、#7 u2 @u1。群事的出处用到了他的话。
     await env.extractor.runDue();
     assert.deepEqual((await env.allFacts(P)).sort(), ['call_name:希望被叫“甲哥”', 'profile:不吃辣']);

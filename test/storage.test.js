@@ -26,37 +26,32 @@ async function twoProcesses(open) {
 }
 
 for (const { name, open } of backends) {
-  test(`[${name}] 重新打开后数据仍在：兴趣、关系、情绪`, async () => {
+  test(`[${name}] 重新打开后数据仍在：兴趣、关系、心情`, async () => {
     const [a] = await twoProcesses(open);
     await a.character.growInterest('荷叶', 0.4);
-    await a.touch('qq:user:1', { name: '小甲', note: '第一次见面' });
-    await a.reactTo({ platform: 'qq', kind: 'message.received', actor: 'x', payload: { sentiment: 'positive' } });
-    const moodBefore = await a.character.getMood();
+    await a.touch('qq:user:1', { name: '小甲' });
+    await a.mood.set('开心');
 
     const reopened = await Fish.open({ db: await open(), tenantId: a.tenantId });
     assert.deepEqual((await reopened.character.topInterests()).map((i) => i.topic), ['荷叶']);
     const rel = await reopened.character.getRelationship('qq:user:1');
     assert.equal(rel.name, '小甲');
-    assert.deepEqual(rel.notes.map((n) => n.text), ['第一次见面']);
-    assert.deepEqual(await reopened.character.getMood(), moodBefore);
+    const mood = await reopened.mood.current();
+    assert.deepEqual([mood.base, mood.manual, mood.drawn], [1, true, false]);
   });
 
   test(`[${name}] 两个进程同时写：关系计数不丢`, async () => {
     const [a, b] = await twoProcesses(open);
-    await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).touch('qq:user:7', { deltaSentiment: 0.01 })));
+    await Promise.all(Array.from({ length: 20 }, (_, i) => (i % 2 ? a : b).touch('qq:user:7')));
     const rel = await a.character.getRelationship('qq:user:7');
     assert.equal(rel.interactions, 20);
-    assert.ok(Math.abs(rel.sentiment - 0.2) < 1e-9);
   });
 
-  test(`[${name}] 两个进程同时改情绪：每次变化都生效`, async () => {
+  test(`[${name}] 两个进程同时改心情：每次变化都生效`, async () => {
     const [a, b] = await twoProcesses(open);
-    const start = await a.character.getMood();
-    const ev = { kind: 'message.received', payload: { sentiment: 'positive' } };
-    await Promise.all(Array.from({ length: 4 }, (_, i) => (i % 2 ? a : b).character.perceive(ev)));
-    const mood = await a.character.getMood();
-    assert.ok(Math.abs(mood.valence - (start.valence + 4 * 0.08)) < 1e-9);
-    assert.ok(Math.abs(mood.arousal - (start.arousal + 4 * 0.05)) < 1e-9);
+    await Promise.all(Array.from({ length: 4 }, (_, i) => (i % 2 ? a : b).mood.nudge(1, { personKey: `p${i}`, conversationKey: `c${i}` })));
+    const mood = await a.mood.current();
+    assert.ok(Math.abs(mood.ripple - 1) < 1e-3, `起伏应该是 1，实际 ${mood.ripple}`);
   });
 
   test(`[${name}] 租户之间数据隔离`, async () => {
@@ -73,7 +68,7 @@ test('迁移可重复执行；失败的迁移整体回滚', async () => {
   try {
     // 新增迁移文件时更新这里的列表。
     const all = ['001_init.sql', '002_model_usage.sql', '003_inbound_messages.sql', '004_context.sql', '005_scrub_recall_queries.sql',
-      '006_memory_v2.sql'];
+      '006_memory_v2.sql', '007_mood.sql'];
     assert.deepEqual(await migrate(db), all);
     assert.deepEqual(await migrate(db), []);
 

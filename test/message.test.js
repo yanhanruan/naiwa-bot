@@ -6,6 +6,8 @@ import {
   ModelError, MessageInbox, MemoryInbox, RUNTIME_DEFAULTS, FactStore, writeFact, placeOf, Participation,
 } from '../src/index.js';
 import { createQQHandler, NOTICES } from '../src/qq-handler.js';
+import { Mood } from '../src/mood/mood.js';
+import { MOOD_TAG_RULE } from '../src/mood/prompt.js';
 import { openFish, testDb, closeTestDb, captureLogger, waitFor, replyToEveryone, INSTANT_ROUNDS } from './helpers.js';
 
 after(closeTestDb);
@@ -485,6 +487,41 @@ test('退出时：停止接收新消息，等手上的处理完再返回', async
 
 // 取系统提示里的某一节（各节之间用空行分隔）。
 const promptSection = (request, title) => request[0].content.split('\n\n').find((s) => s.startsWith(`## ${title}`));
+
+test('心情：模型写的心情那一行不发出去、不进原话表，心情往那边挪；只写了那一行就当不回复', async (t) => {
+  const outputs = ['[回 u1]\n呜……好吧\n[心情 变差 u1]', '[心情 变差 u1]'];
+  const prompts = [];
+  const brain = { chat: async (messages) => { prompts.push(messages[0].content); return outputs[prompts.length - 1]; } };
+  const h = await setup(t, { brain });
+  const mood = new Mood({ db: h.fish.db, tenantId: h.fish.tenantId });
+  await mood.set('平常');
+  const handle = h.another({ mood, moodTexts: { 有点低落: '今天你有点低落。' } });
+  await handle(event({ message_id: 1, message: '你真笨' }));
+  assert.deepEqual(h.sent.map((s) => s.message), [[{ type: 'text', data: { text: '呜……好吧' } }]]);
+  const { rows } = await h.fish.db.query("SELECT content FROM conversation_turns WHERE tenant_id = $1 AND role = 'assistant'", [h.fish.tenantId]);
+  assert.deepEqual(rows.map((r) => r.content), ['呜……好吧']);
+  assert.equal((await mood.current()).ripple.toFixed(2), '-0.25');
+  assert.ok(prompts[0].includes(MOOD_TAG_RULE));
+  assert.ok(!prompts[0].includes('## 现在的心情'), '平常不加心情那一段');
+  const shift = h.logs.entries.find((e) => e.event === 'mood.shift');
+  assert.deepEqual([shift.direction, shift.counted, shift.personKey], [-1, true, undefined], '日志不记是谁');
+
+  await handle(event({ user_id: 102, message_id: 2, sender: { nickname: '小乙' }, message: '笨蛙' }));
+  assert.equal(h.sent.length, 1, '只写了心情那一行：不发、不报错');
+  assert.equal((await mood.current()).level, -1, '两个人说了它，挪到有点低落');
+  assert.ok(h.errors.every((e) => e.event !== 'model.failed'));
+});
+
+test('心情：不是平常时，说明书里人设后面放这一档的说法；不用心情时说明书里没有心情的规则', async (t) => {
+  const h = await setup(t);
+  const mood = new Mood({ db: h.fish.db, tenantId: h.fish.tenantId });
+  await mood.set('开心');
+  await h.another({ mood, moodTexts: { 开心: '今天你心情不错。' } })(event({ message_id: 1 }));
+  assert.ok(h.requests[0][0].content.startsWith('测试角色\n\n## 现在的心情\n今天你心情不错。'));
+  await h.handle(event({ message_id: 2, group_id: 201 }));
+  assert.ok(!h.requests[1][0].content.includes(MOOD_TAG_RULE));
+  assert.ok(!h.requests[1][0].content.includes('## 现在的心情'));
+});
 
 test('重启后记得之前的对话：短期历史和代号都存在数据库里', async (t) => {
   const h = await setup(t);

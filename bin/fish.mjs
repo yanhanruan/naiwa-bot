@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { Fish } from '../src/index.js';
+import { Fish, MOOD_LEVELS, moodName } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
 import { acquireRunLock } from '../src/storage/run-lock.js';
 import { FactStore, ITEMS } from '../src/memory/facts.js';
@@ -96,6 +96,18 @@ async function run(fish, cmd, args) {
     case 'state':
       out(await fish.bridge.getCharacterState());
       break;
+    case 'mood': {
+      // 奶蛙今天的心情（Module 8）。mood set <档> 改今天的基调，机器人在跑也立刻生效。
+      const [sub, name] = args;
+      if (sub && sub !== 'set') {
+        console.error(`用法：fish mood 看今天的心情；fish mood set <档> 改今天的基调（${MOOD_LEVELS.map((l) => l.name).join('、')}）`);
+        process.exitCode = 1;
+        return;
+      }
+      const m = sub === 'set' ? await fish.mood.set(name ?? '') : await fish.mood.current();
+      console.log(`今天（${m.day}）的基调：${moodName(m.base)}（${m.manual ? '手动改的' : '早上抽的'}）；现在：${moodName(m.level)}；起伏 ${m.ripple.toFixed(2)}`);
+      break;
+    }
     case 'facts': {
       const [target, ...rest] = args;
       if (!target) {
@@ -177,7 +189,8 @@ async function run(fish, cmd, args) {
 用法: fish <command> [args]
 
   status                      结构化运行状态（Character OS Bridge）
-  state                       角色当前情绪与状态
+  state                       角色当前心情与状态
+  mood [set <档>]             看今天的心情；set 改今天的基调（很低落、有点低落、平常、开心、很开心）
   facts <QQ 号或群号>          列出奶蛙记下的事：内容、出自哪里、原话、什么时候删除（--json 输出原始数据）
   fact-forget <编号>           删除一条事实
   forget-person <key> --yes   删除这个人的数据（事实、原话、关系、代号、事件记录）；必须先停机器人。不加 --yes 只预览条数
