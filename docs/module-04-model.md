@@ -146,7 +146,7 @@ docker compose exec db psql -U naiwa -d naiwa -c "SELECT conversation_key, calls
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `MODEL_DAILY_BUDGET_CNY` | `20` | 每日花费上限（元，估算）；`0` 表示不限 |
+| ~~`MODEL_DAILY_BUDGET_CNY`~~ | `20` | Module 9 起改用 `naiwa budget set <元>`（存数据库，奶蛙在跑也能改），`.env` 里还写着会启动报错 |
 | `MODEL_RATE_PER_MINUTE` | `10` | 每个会话每分钟最多调用几次；`0` 表示不限 |
 | `MODEL_RATE_PER_HOUR` | `120` | 每个会话每小时最多调用几次；`0` 表示不限 |
 | `DEEPSEEK_WEB_SEARCH` | 开启 | 设为 `off` 关闭联网搜索 |
@@ -189,5 +189,5 @@ npm test
 - 群内按人限速：现在只按会话限速，一个人刷屏会占掉整个群的额度。
 - 节假日日历：节假日按工作日估算（偏高）。
 - 精确记账：同时到达的几条消息可能一起越过上限；超时的调用只能估算。
-- 管理命令查看花费、调整上限（Module 9）。目前用上面的 SQL 查。
+- 管理命令查看花费、调整上限（Module 9）。已做：`naiwa budget` 看今天的花费（按模型、花得最多的会话），`naiwa budget set <元>` 改上限，见 [Module 9 设计稿](module-09-admin-design.md)。
 - 流式输出。

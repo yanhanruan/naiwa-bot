@@ -6,8 +6,9 @@
 //   export DATABASE_URL=postgres://...   # PostgreSQL（见 docker-compose.yml 的 db 服务）
 //   node bin/fish-bot.mjs     # 默认连 ws://127.0.0.1:3001
 // 日志：LOG_LEVEL=debug|info|warn|error（默认 info）；LOG_FORMAT=pretty|json（默认：终端里 pretty，否则 json）。
+// 管理命令（见 docs/module-09-admin-design.md）：每日花费上限、不理的 QQ 号、每个群说不说话都存在数据库里，
+//   用 naiwa budget / naiwa ignore / naiwa group 改，奶蛙每 5 秒读一次，不用重启。naiwa status 看奶蛙现在怎么样。
 // 模型调用的限制（见 docs/module-04-model.md）：
-//   MODEL_DAILY_BUDGET_CNY   每日花费上限（元，按官方价格估算），默认 20；0 表示不限
 //   MODEL_RATE_PER_MINUTE    每个会话每分钟最多调用几次，默认 10；0 表示不限
 //   MODEL_RATE_PER_HOUR      每个会话每小时最多调用几次，默认 120；0 表示不限
 //   DEEPSEEK_WEB_SEARCH      off 关闭联网搜索（默认开启，只有 deepseek-v4-pro 支持）
@@ -19,7 +20,6 @@
 //   MEMORY_BATCH_FORCE       未提炼的原话攒到多少条就提炼，默认 40
 // 群里什么时候说话（见 docs/module-07-group-chat-design.md）：
 //   BOT_NAMES                能叫它的名字（逗号分隔），默认 奶蛙；消息以名字开头才算叫它
-//   IGNORE_QQ                不理的 QQ 号（逗号分隔），例如群里别的机器人；他们的话也不进群里最近的聊天
 //   GROUP_CONTEXT            off 不把群里最近的聊天放进提示（默认放：最近 20 条、10 分钟内、整段最多 1000 字，只在内存里）；
 //                            关掉后不记内容，只记谁什么时候说了话，用来判断回复时要不要引用原消息
 // 看懂图片、引用带原文（见 docs/image-understanding-design.md）：
@@ -44,10 +44,11 @@ import { acquireRunLock } from '../src/storage/run-lock.js';
 import { Participation } from '../src/runtime/participation.js';
 import { GroupContext } from '../src/runtime/group-context.js';
 import { RoundLooker } from '../src/images/look.js';
-import { entityKey } from '../src/identity.js';
 import { createQQHandler } from '../src/qq-handler.js';
 import { loadMoodTexts } from '../src/mood/prompt.js';
 import { loggerFromEnv } from '../src/log.js';
+import { Settings } from '../src/admin/settings.js';
+import { BotStatus, codeInfo } from '../src/admin/status.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
@@ -60,6 +61,15 @@ const apiKey = process.env.DEEPSEEK_API_KEY ?? '';
 const model = process.env.DEEPSEEK_MODEL ?? 'deepseek-v4-pro';
 const personaPath = process.env.FISH_PERSONA ?? join(root, 'persona', 'naiwa.md');
 const log = loggerFromEnv();
+
+// 这两项挪进了数据库，用命令改（Module 9）。.env 里还写着就不启动，免得两个地方写的不一样、不知道哪个算数。
+const moved = { MODEL_DAILY_BUDGET_CNY: 'naiwa budget set <元>', IGNORE_QQ: 'naiwa ignore add <QQ 号>' };
+for (const [name, command] of Object.entries(moved)) {
+  if (process.env[name] !== undefined) {
+    console.error(`${name} 已经不用了：改用 ${command}（存在数据库里，奶蛙在跑时也能改）。请从 .env 里删掉这一行。`);
+    process.exit(1);
+  }
+}
 
 if (!apiKey) {
   console.error('缺少 DEEPSEEK_API_KEY。到 platform.deepseek.com 申请后：');
@@ -78,7 +88,6 @@ function numberFromEnv(name, fallback) {
   }
   return value;
 }
-const dailyBudgetCny = numberFromEnv('MODEL_DAILY_BUDGET_CNY', 20);
 const ratePerMinute = numberFromEnv('MODEL_RATE_PER_MINUTE', 10);
 const ratePerHour = numberFromEnv('MODEL_RATE_PER_HOUR', 120);
 const webSearch = !/^(off|false|0|no)$/i.test(process.env.DEEPSEEK_WEB_SEARCH ?? '');
@@ -94,11 +103,6 @@ if (!(memoryBatchForce >= 1)) {
 // 只按逗号分隔：名字里可以有空格（例如 "Nai Wa"）。
 const listFromEnv = (name) => (process.env[name] ?? '').split(/[,，]/).map((x) => x.trim()).filter(Boolean);
 const botNames = listFromEnv('BOT_NAMES').length ? listFromEnv('BOT_NAMES') : ['奶蛙'];
-const ignoreQQ = listFromEnv('IGNORE_QQ');
-if (ignoreQQ.some((id) => !/^\d+$/.test(id))) {
-  console.error('IGNORE_QQ 只能填 QQ 号（数字），多个用逗号分隔');
-  process.exit(1);
-}
 const groupContextOn = !/^(off|false|0|no)$/i.test(process.env.GROUP_CONTEXT ?? '');
 const imageUnderstanding = !/^(off|false|0|no)$/i.test(process.env.IMAGE_UNDERSTANDING ?? '');
 const imageModel = process.env.IMAGE_MODEL?.trim() || 'deepseek-flash';
@@ -143,6 +147,19 @@ try {
   process.exit(1);
 }
 const fish = await (await Fish.open({ db, writer, name: '奶蛙' })).start();
+// 设置和运行状态（Module 9）：先读一遍设置（读不到就不启动），之后每 5 秒读一次设置、写一次心跳。
+const settings = new Settings({ db, tenantId: fish.tenantId });
+const status = new BotStatus({ db, tenantId: fish.tenantId, settings, logger: log });
+try {
+  await status.start(codeInfo(root));
+} catch (error) {
+  console.error(`读设置失败：${error?.message ?? error}`);
+  await writer.close();
+  await db.close().catch(() => {});
+  process.exit(1);
+}
+// 每日上限每次调用前从设置里取：回复、看图、提炼用同一个值。
+const dailyBudgetCny = () => settings.dailyBudgetCny;
 // 模型调用适配器：超时与重试、花费估算入账、每日花费上限、按会话限速都在里面完成。
 const ledger = new ModelUsageLedger({ db, tenantId: fish.tenantId });
 const brain = new DeepSeekBrain({
@@ -211,11 +228,12 @@ const looker = new RoundLooker({
 const handleEvent = createQQHandler({
   fish, brain, getClient: () => client, persona, socialRules, logger: log, inbox, history, aliases, facts, sentMessageKeys,
   botNames,
-  participation: new Participation({ botNames, ignoreUsers: ignoreQQ.map((id) => entityKey('qq', 'user', id)) }),
+  participation: new Participation({ botNames, settings }),
   groupContext: new GroupContext({ keepText: groupContextOn }),
   looker,
   mood: fish.mood,
   moodTexts,
+  status,
 });
 
 // 后台提炼：便宜的模型，不联网、不思考；花费记在同一本账上，计入每日上限。
@@ -230,6 +248,7 @@ const client = new OneBotClient({
   url: ws,
   token,
   logger: log,
+  onStatus: ({ connected }) => status.noteConnection(connected),
   onEvent: (ev) => {
     record(ev);
     return handleEvent(ev);
@@ -251,6 +270,7 @@ async function shutdown(signal) {
   client.stop();
   extractor?.stop();
   try {
+    await status.stop();
     await fish.stop();
     await writer.close();
     await db.close();
@@ -264,10 +284,10 @@ process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 log.info('bot.started', {
   msg: `${fish.character.name} 醒来`, model, webSearch, reasoningEffort, storage: 'PostgreSQL', recordFile: recordFile || undefined,
-  dailyBudgetCny: dailyBudgetCny || '不限', ratePerMinute: ratePerMinute || '不限', ratePerHour: ratePerHour || '不限',
+  dailyBudgetCny: settings.dailyBudgetCny || '不限', ratePerMinute: ratePerMinute || '不限', ratePerHour: ratePerHour || '不限',
   memoryExtraction, memoryModel: memoryExtraction ? memoryModel : undefined,
   imageUnderstanding, imageModel: imageUnderstanding ? imageModel : undefined,
   memoryQuietMs: memoryExtraction ? memoryQuietMs : undefined,
-  botNames, ignoreQQ: ignoreQQ.length || undefined, groupContext: groupContextOn,
+  botNames, ignoreQQ: settings.values.ignoreQQ.length || undefined, groupContext: groupContextOn,
 });
 client.start();

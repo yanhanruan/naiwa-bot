@@ -5,11 +5,16 @@
 //   explicit  明确叫它：私聊、@ 奶蛙、引用奶蛙的消息。要回他
 //   judge     请模型看，回不回由模型定：开头叫名字（name）、正在留意的人说话（follow_up）
 //   wait      只 @ 不说话：处理器单独给这个人几秒补话（见 qq-handler.js）
-//   ignore    不看：群友之间聊天、名字在句子中间、@全体、不理的 QQ 号、同一个人回得太多
+//   ignore    不看：群友之间聊天、名字在句子中间、@全体、不理的 QQ 号、同一个人回得太多、
+//             群开关是“不说话”（group_off）、“只回 @”的群里没 @ 也没引用它（at_only）
 // 这个人是不是在正在攒的“这一轮”里、是不是刚才只 @ 不说话，由处理器判断（它记着），不在这里。
 //
 // “留意”：有人叫了奶蛙（@、引用、只 @ 不说话、开头叫名字），或者奶蛙回了他，接下来 watchMs 内留意这个人，
 // 他说的话哪怕没 @ 也请模型看一眼。模型看过他的话、决定不回他，马上不再留意（dismiss），直到他再叫奶蛙。
+//
+// 群开关和不理的 QQ 号（Module 9）：从 settings 取（见 src/admin/settings.js），奶蛙每 5 秒刷新一次。
+// “只回 @”的群：只有 @ 它、引用它才算叫它；开头叫名字、留意的人接着说都不看。
+// 同一轮里他 7 秒内补的话照样一起看（由处理器判断，见 qq-handler.js 的 decide）。
 
 export const PARTICIPATION_DEFAULTS = {
   botNames: ['奶蛙'],
@@ -36,15 +41,18 @@ export class Participation {
   /**
    * @param {object} [options]
    * @param {string[]} [options.botNames] 能叫它的名字
-   * @param {string[]} [options.ignoreUsers] 不理的人（人的 key，例如 qq:user:101）
+   * @param {string[]} [options.ignoreUsers] 不理的人（人的 key，例如 qq:user:101），测试用；奶蛙用 settings
+   * @param {{isIgnored: (personKey: string) => boolean, groupMode: (conversationKey: string) => 'on'|'at'|'off'}} [options.settings]
+   *   群开关和不理的 QQ 号（src/admin/settings.js 的 Settings）；不传就是都说话、谁都理
    * @param {() => number} [options.now] 毫秒时间戳，测试用
    * 其余见 PARTICIPATION_DEFAULTS。
    */
-  constructor({ botNames, ignoreUsers = [], now = () => Date.now(), ...options } = {}) {
+  constructor({ botNames, ignoreUsers = [], settings = null, now = () => Date.now(), ...options } = {}) {
     const given = Object.fromEntries(Object.entries(options).filter(([, value]) => value !== undefined));
     this.options = { ...PARTICIPATION_DEFAULTS, ...given };
     this.botNames = (botNames?.length ? botNames : PARTICIPATION_DEFAULTS.botNames).filter(Boolean);
     this.ignored = new Set(ignoreUsers);
+    this.settings = settings;
     this.now = now;
     this.watching = new Map(); // 群+人 -> { from: 从什么时候开始留意, until: 留意到什么时候 }
     this.replies = new Map(); // 群+人 -> 最近发给他的时间（升序）
@@ -52,7 +60,12 @@ export class Participation {
   }
 
   isIgnored(personKey) {
-    return this.ignored.has(personKey);
+    return this.ignored.has(personKey) || Boolean(this.settings?.isIgnored(personKey));
+  }
+
+  // 这个会话的群开关：on 说话、at 只回 @、off 不说话。私聊永远是 on。
+  groupMode(conversationKey) {
+    return this.settings?.groupMode(conversationKey) ?? 'on';
   }
 
   // 开头叫它：“奶蛙，…”“奶蛙 …”“奶蛙？”“奶蛙你…”，或者整条就是“奶蛙”。名字在句子中间不算。
@@ -75,14 +88,17 @@ export class Participation {
    */
   classify(message, { quotesSelf = false } = {}) {
     const person = message.sender.key;
-    if (this.ignored.has(person)) return { action: 'ignore', reason: 'ignored_user' };
+    if (this.isIgnored(person)) return { action: 'ignore', reason: 'ignored_user' };
     if (message.conversation.kind === 'private') return { action: 'explicit', reason: 'private' };
+    const mode = this.groupMode(message.conversation.key);
+    if (mode === 'off') return { action: 'ignore', reason: 'group_off' };
     const key = keyOf(message.conversation.key, person);
     if (this._capped(key)) return { action: 'ignore', reason: 'person_cap', notify: this._shouldWarn(key) };
     if (message.mentionsSelf) {
       return isEmptyMention(message) ? { action: 'wait', reason: 'empty_mention' } : { action: 'explicit', reason: 'mention' };
     }
     if (quotesSelf) return { action: 'explicit', reason: 'quote' };
+    if (mode === 'at') return { action: 'ignore', reason: 'at_only' };
     const name = this.calledName(message.text);
     if (name !== null) return { action: 'judge', reason: 'name', name };
     if (this.isWatched(message.conversation.key, person)) return { action: 'judge', reason: 'follow_up' };

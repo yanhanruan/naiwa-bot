@@ -952,3 +952,115 @@ test('合并以后记忆照样对：一轮里两个人、奶蛙分别回；提�
   const left = await h.turns();
   assert.deepEqual(left.map(renderTurn).map((t) => [t.speaker, t.text]), [['u2', '@奶蛙我在上海'], ['奶蛙', '上海好呀']]);
 });
+
+// —— 群开关、不理的 QQ 号（Module 9，docs/module-09-admin-design.md 第 4 节）——
+
+// 内存里的设置，测试里随时改：modes[群号] = 'on' | 'at' | 'off'。真正的设置读写见 test/admin.test.js。
+function liveSettings() {
+  return {
+    modes: {}, groupDefault: 'on', ignored: new Set(),
+    groupMode(conversationKey) {
+      const m = /:conversation:group:(\d+)$/.exec(conversationKey);
+      return m ? (this.modes[m[1]] ?? this.groupDefault) : 'on';
+    },
+    isIgnored(personKey) { return this.ignored.has(personKey); },
+  };
+}
+
+async function setupWithSettings() {
+  const settings = liveSettings();
+  const h = await setup((hh) => ({ participation: new Participation({ settings, now: () => hh.clock }) }));
+  h.settings = settings;
+  return h;
+}
+
+test('群开关：不说话的群里 @ 它不出声、不调用模型、不进群里刚才在聊、不写原话表、不记消息记录；别的群和私聊照常；打开以后照常回', async () => {
+  const h = await setupWithSettings();
+  h.settings.modes[200] = 'off';
+  await h.round({ message: `${AT}推荐个奶茶` });
+  await h.round({ message: '奶蛙，你在干嘛' });
+  await h.say({ message: AT });
+  await h.advance(8000);
+  assert.equal(h.requests.length, 0);
+  assert.equal(h.sent.length, 0, '只 @ 不说话也不回“干嘛蛙”');
+  assert.equal(await h.status(1), undefined, '不记消息记录');
+  assert.equal((await h.turns()).length, 0);
+
+  await h.round({ group_id: 300, message: `${AT}你好` });
+  await h.round({ message_type: 'private', sub_type: 'friend', message: '私聊你好' });
+  assert.equal(h.sent.length, 2, '群 300 和私聊照常回');
+
+  h.settings.modes[200] = 'on';
+  await h.round({ message: `${AT}现在呢` });
+  assert.equal(h.sent.length, 3);
+  assert.ok(!allText(h.requests.at(-1)).includes('推荐个奶茶'), '关着的时候说的话不进群里刚才在聊');
+});
+
+test('群开关：模型正在想的时候调成不说话，这一轮不发、记成 group_off；只 @ 不说话在等的时候关掉，不发“干嘛蛙”', async () => {
+  const h = await setupWithSettings();
+  const gates = gate(h);
+  const done = h.say({ message: `${AT}推荐个奶茶` });
+  await h.advance(3000);
+  await waitFor(() => gates.length === 1);
+  h.settings.modes[200] = 'off';
+  gates[0]('杨枝甘露');
+  await done;
+  assert.equal(h.sent.length, 0);
+  assert.equal(await h.outcome(1), 'group_off');
+  assert.equal((await h.turns()).length, 0);
+
+  h.settings.modes[200] = 'on';
+  await h.say({ message: AT });
+  await h.advance(5000);
+  h.settings.modes[200] = 'off';
+  await h.advance(3000);
+  await waitFor(async () => (await h.status(2)) === 'silent', { what: '空 @ 处理完' });
+  assert.equal(await h.outcome(2), 'group_off');
+  assert.equal(h.sent.length, 0);
+});
+
+test('群开关：只回 @ 的群，@、引用它照常回，@ 以后马上补的话一起看；开头叫名字、回完以后不 @ 接着说都不看；只 @ 不说话还回“干嘛蛙”', async () => {
+  const h = await setupWithSettings();
+  h.settings.modes[200] = 'at';
+  const first = h.say({ message: `${AT}推荐个奶茶` });
+  await h.advance(1000);
+  const second = h.say({ message: '要少糖的' });
+  await h.advance(3000);
+  await Promise.all([first, second]);
+  assert.equal(h.requests.length, 1);
+  assert.equal(roundLines(h.requests[0]).length, 2, '同一轮补的话一起看');
+  assert.equal(h.sent.length, 1);
+
+  await h.round({ message: '那芋泥的呢' });
+  await h.round({ message: '奶蛙，你在干嘛' });
+  assert.equal(h.requests.length, 1, '回完以后不 @ 接着说、开头叫名字，都不看');
+  assert.ok(nearbyOf(await (async () => {
+    await h.round({ message: `[CQ:reply,id=9001]真的吗` });
+    return h.requests.at(-1);
+  })()).includes('那芋泥的呢'), '没看的话照常进群里刚才在聊');
+  assert.equal(h.sent.length, 2, '引用它的话照常回');
+
+  await h.say({ message: AT });
+  await h.advance(8000);
+  await waitFor(() => h.sent.length === 3, { what: '干嘛蛙' });
+  assert.equal(h.texts().at(-1), EMPTY_MENTION_REPLY);
+
+  h.settings.modes[200] = 'on';
+  await h.advance(60_000);
+  await h.round({ message: '奶蛙，你在干嘛' });
+  assert.equal(h.requests.length, 3, '调回说话：开头叫名字交给模型');
+});
+
+test('不理的 QQ 号：随时加、随时去掉；加上以后他 @ 也不回，他的话不进群里刚才在聊；私聊也不理', async () => {
+  const h = await setupWithSettings();
+  h.settings.ignored.add('qq:user:666');
+  await h.round({ user_id: 666, message: `${AT}我是别的机器人` });
+  await h.round({ user_id: 666, message_type: 'private', sub_type: 'friend', message: '私聊' });
+  await h.round({ message: `${AT}你好` });
+  assert.equal(h.sent.length, 1);
+  assert.ok(!allText(h.requests[0]).includes('机器人'));
+
+  h.settings.ignored.clear();
+  await h.round({ user_id: 666, message: `${AT}现在理我吗` });
+  assert.equal(h.sent.length, 2);
+});

@@ -98,7 +98,8 @@ export class DeepSeekBrain {
    * @param {string} options.apiKey
    * @param {import('./usage-ledger.js').ModelUsageLedger} [options.ledger] 用量账本；不传就不入账，也不执行每日上限
    * @param {import('./rate-limiter.js').ConversationRateLimiter} [options.limiter] 按会话限速；不传就不限
-   * @param {number} [options.dailyBudgetCny] 每日花费上限（元）；0 表示不限
+   * @param {number|(() => number)} [options.dailyBudgetCny] 每日花费上限（元）；0 表示不限。
+   *   传函数时每次调用前取一次（Module 9：用 naiwa budget set 改，奶蛙不用重启）
    * @param {object} [options.logger] 见 src/log.js
    * 其余选项见 BRAIN_DEFAULTS。
    */
@@ -117,7 +118,7 @@ export class DeepSeekBrain {
     this.maxOutputTokens = this.options.maxOutputTokens;
     this.ledger = ledger;
     this.limiter = limiter;
-    this.dailyBudgetCny = dailyBudgetCny;
+    this.budget = typeof dailyBudgetCny === 'function' ? dailyBudgetCny : () => dailyBudgetCny;
     this.log = logger;
     this.fetchImpl = fetchImpl;
     this.now = now;
@@ -293,7 +294,8 @@ export class DeepSeekBrain {
   }
 
   async _checkBudget(log) {
-    if (!this.ledger || !(this.dailyBudgetCny > 0)) return;
+    const budgetCny = Number(this.budget());
+    if (!this.ledger || !(budgetCny > 0)) return;
     const at = this.now();
     let spentCny;
     try {
@@ -304,15 +306,15 @@ export class DeepSeekBrain {
       return;
     }
     const day = beijingDate(at);
-    const fields = { spentCny: round(spentCny), budgetCny: this.dailyBudgetCny, day };
-    if (spentCny >= this.dailyBudgetCny) {
+    const fields = { spentCny: round(spentCny), budgetCny, day };
+    if (spentCny >= budgetCny) {
       if (this.budgetAlerts.exceeded !== day) {
         this.budgetAlerts.exceeded = day;
         log.error('model.budget_exceeded', { msg: '今日模型花费已达上限，北京时间零点前不再调用模型', ...fields });
       }
       throw new ModelError('BUDGET_EXCEEDED');
     }
-    if (spentCny >= this.dailyBudgetCny * this.options.budgetWarnRatio && this.budgetAlerts.warned !== day) {
+    if (spentCny >= budgetCny * this.options.budgetWarnRatio && this.budgetAlerts.warned !== day) {
       this.budgetAlerts.warned = day;
       log.warn('model.budget_warning', {
         msg: `今日模型花费已超过上限的 ${Math.round(this.options.budgetWarnRatio * 100)}%`, ...fields,

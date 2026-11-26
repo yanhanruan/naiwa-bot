@@ -1,6 +1,6 @@
 # Fish OS — 跨平台数字生命核心
 
-一条可运行、可验证、可继续扩展的数字生命原型。本包是**平台无关的核心**：人格引擎、记忆（带出处的事实）、事件存储、审批策略、主动调度、Character OS Bridge。平台传输层（QQ 等）通过适配器复用成熟组件接入。
+一条可运行、可验证、可继续扩展的数字生命原型。本包是**平台无关的核心**：人格引擎、记忆（带出处的事实）、事件存储、心情、管理命令（设置存数据库、运行中的奶蛙读得到）、Character OS Bridge。平台传输层（QQ 等）通过适配器复用成熟组件接入。
 
 > **当前状态（2026-11）**：本仓库的 QQ bot 是「奶蛙」——SnowLuma(OneBot v11) + DeepSeek Responses API（服务端 web_search）。架构与消息流见 [docs/architecture.md](docs/architecture.md)。
 
@@ -14,7 +14,7 @@
                  ┌──────────────────────────────────────────┐
                  │                Fish（顶层编排）            │
                  ├──────────────────────────────────────────┤
- 平台适配器 ────▶ │      reactTo / touch / act / 事实读取      │
+ 平台适配器 ────▶ │         reactTo / touch / 事实读取         │
   (QQ / B站/…)   ├───────────────┬───────────────────────────┤
                  │               │                           │
      ┌───────────▼──────┐  ┌─────▼──────┐  ┌───────────────┐
@@ -22,10 +22,10 @@
      │ 人格·情绪·兴趣·关系 │  │ 带出处的事实 │  │ 统一事件格式   │
      └───────────┬──────┘  └────────────┘  └───────────────┘
                  │
-     ┌───────────▼──────────┐  ┌──────────────┐  ┌────────────────┐
-     │ Policy & Approval    │  │ Scheduler    │  │ Character OS   │
-     │ 审批/发布/私信门控     │  │ 主动行为调度  │  │ Bridge（结构化）│
-     └──────────────────────┘  └──────────────┘  └────────────────┘
+     ┌───────────▼──────────┐  ┌──────────────────┐  ┌────────────────┐
+     │ Mood                 │  │ Admin            │  │ Character OS   │
+     │ 每日基调 + 日内起伏    │  │ 设置·心跳·fish 命令 │  │ Bridge（结构化）│
+     └──────────────────────┘  └──────────────────┘  └────────────────┘
 ```
 
 核心原则：**人格与记忆只有一套**，各平台只是适配器；平台业务逻辑不写进角色核心。
@@ -43,12 +43,15 @@ naiwa-bot/
 │   ├── storage/            # PostgreSQL 连接、迁移执行器、运行锁（持锁写入连接）
 │   ├── eventstore.js       # 事件存储
 │   ├── character.js        # 人格引擎
-│   ├── policy.js           # 审批策略
-│   ├── scheduler.js        # 主动调度
 │   ├── bridge.js           # Character OS Bridge
 │   ├── fish.js             # 顶层编排
 │   ├── qq-handler.js       # QQ 消息处理（取事实、调模型、发送、记录）
+│   ├── policy.js           # 审批策略（预留，还没接上）
+│   ├── scheduler.js        # 主动调度（预留，还没接上）
 │   ├── log.js              # 结构化日志
+│   ├── admin/
+│   │   ├── settings.js       # 设置：每日花费上限、不理的 QQ 号、群开关（存数据库，奶蛙每 5 秒读一次）
+│   │   └── status.js         # 运行状态：奶蛙写心跳，naiwa status 读
 │   ├── model/
 │   │   ├── brain.js          # DeepSeek 调用（时限、重试、检查结果、入账、执行上限）
 │   │   ├── errors.js         # 模型调用的错误分类
@@ -80,8 +83,8 @@ naiwa-bot/
 │   └── index.js
 ├── bin/
 │   ├── fish-bot.mjs        # QQ 机器人入口（奶蛙）
-│   ├── fish.mjs            # CLI
-│   └── fish-daemon.mjs     # 长驻进程（主动调度心跳）
+│   ├── naiwa.mjs           # 管理命令（CLI）
+│   └── fish-daemon.mjs     # 长驻进程（主动调度心跳；预留，还没接上）
 ├── migrations/             # 编号的 SQL 迁移（001_init.sql …）
 ├── scripts/
 │   ├── backup.sh           # pg_dump 备份
@@ -102,31 +105,39 @@ naiwa-bot/
 cd naiwa-bot
 npm install
 
-# 结构化状态（Character OS Bridge）
-node bin/fish.mjs status
+# 奶蛙现在怎么样：在不在跑、连没连上 QQ、心情、今天花费、设置
+node bin/naiwa.mjs status
+
+# 花费：看今天花了多少；改每日上限（0 表示不限）；回到默认 20 元
+node bin/naiwa.mjs budget
+node bin/naiwa.mjs budget set 30
+node bin/naiwa.mjs budget reset
+
+# 群开关：说话 / 只回 @ / 不说话 / 回到跟着默认；没单独设置的群默认用哪一档
+node bin/naiwa.mjs groups
+node bin/naiwa.mjs group 200 off
+node bin/naiwa.mjs group default on
+
+# 不理的 QQ 号（例如群里别的机器人）
+node bin/naiwa.mjs ignore add 123456
+node bin/naiwa.mjs ignore remove 123456
 
 # 查看奶蛙记得的事（关于某人或出自某个群），含出处原话
-node bin/fish.mjs facts qq:user:101
-node bin/fish.mjs facts qq:group:200
-node bin/fish.mjs fact-forget <编号>
+node bin/naiwa.mjs facts qq:user:101
+node bin/naiwa.mjs facts qq:group:200
+node bin/naiwa.mjs fact-forget <编号>
 
 # 删除某人的数据：先停机器人；不加 --yes 只预览条数
-node bin/fish.mjs forget-person qq:user:101 --yes
+node bin/naiwa.mjs forget-person qq:user:101 --yes
 
 # B站只读内容获取（真实拉取，无写操作）
-node bin/fish.mjs browse bilibili popular 5
-node bin/fish.mjs browse bilibili search 鲸鱼 5
-
-# 发起一次发布意图（默认需审批）
-node bin/fish.mjs act publish "想去 B 站发一条动态"
-# -> 返回 pendingApprovalId，再 approve
-node bin/fish.mjs approve <id>
-
-# 主动行为总开关
-node bin/fish.mjs proactive-on   # / proactive-off
+node bin/naiwa.mjs browse bilibili popular 5
+node bin/naiwa.mjs browse bilibili search 鲸鱼 5
 ```
 
-命令通过 `DATABASE_URL` 连接 PostgreSQL（`npm run fish -- status` 会自动读取 `.env`）。连不上数据库时直接报错退出。
+改设置的命令写进数据库，正在跑的奶蛙每 5 秒读一次；命令会等它读到（最多 10 秒），告诉你几秒后生效，奶蛙没在跑就说下次启动时生效。见 [Module 9 设计稿](docs/module-09-admin-design.md)。
+
+命令通过 `DATABASE_URL` 连接 PostgreSQL（`npm run naiwa -- status` 会自动读取 `.env`）。连不上数据库时直接报错退出。
 
 ## API
 
@@ -140,9 +151,8 @@ const fish = await (await Fish.open({ db, name: '奶蛙', persona: { core: '...'
 
 // 涉及存储的方法都是异步的
 await fish.reactTo({ platform: 'qq', kind: 'message.received', actor: 'peerA', payload: { text: 'hi', sentiment: 'positive' } });
-await fish.touch('peerA', { name: '小明', deltaSentiment: 0.2 });
-await fish.bridge.act({ type: 'publish', platform: 'bilibili', target: '评论', text: '...' });
-await fish.bridge.getStatus();   // 结构化状态
+await fish.touch('peerA', { name: '小明' });
+await fish.bridge.getCharacterState();   // 结构化角色状态
 await db.close();
 ```
 
@@ -159,11 +169,15 @@ await db.close();
 - 回复时只经 `FactStore.inView(地方, 涉及的人)` 读：这个群或私聊的事实，加上涉及的人在群里说的称呼。私聊来的事实永远不进群；
 - 到期自动删除（称呼、个人情况 1 年，近况 14 天，群事 30 天，从说出时算起）；运维可以查看、删单条、按人删除。
 
-## 审批策略
+## 审批（预留）
+
+奶蛙现在只会回复，还没有发布、私信、主动说话这些动作。下面这些先预留着，以后有这些动作时接上（审批记录、开关到时存进数据库）：
 
 - `read` / `reply`：允许
 - `publish` / `dm`：默认**需逐次审批**（最小权限）
 - `proactive`：受「主动行为总开关」控制（默认关闭）
+
+现在的 `naiwa act`、`naiwa approve`、`naiwa proactive-on` 不会真的发出去，批准记录和开关只在那条命令里，命令结束就没了。
 
 ## 测试
 
@@ -171,7 +185,9 @@ await db.close();
 npm test        # 执行 test/*.test.js（核心测试 + 模块回归测试）
 ```
 
-覆盖验收项：① 连续人格稳定 + 情绪变化 ② 重启恢复角色状态 ⑤ 统一事件结构 ⑥ 未经批准不发布/私信 ⑧ Bridge 结构化状态，外加关系记忆、主动开关，以及存储层的并发写入、租户隔离和迁移回滚。
+覆盖验收项：① 连续人格稳定 ② 重启恢复角色状态 ⑤ 统一事件结构 ⑥ 未经批准不发布/私信（预留的审批）⑧ Bridge 结构化状态，外加关系记忆、主动开关（预留），以及存储层的并发写入、租户隔离和迁移回滚。
+
+管理命令的测试（`test/admin.test.js` 和 `test/group-chat.test.js` 末尾）覆盖设置的读写和校验、几条命令同时改不覆盖、在跑 / 正常退出 / 没响应、改完等奶蛙读到、读设置失败继续用旧值、群开关三档、不理的号随时加减、模型在想时关掉群不发、调低花费上限马上拦，见 [Module 9 设计稿](docs/module-09-admin-design.md) 第 9 节。
 
 设置 `TEST_DATABASE_URL`（指向一个**专用的测试数据库**）时，存储测试还会在真实 PostgreSQL 上再跑一遍，验证多连接并发；运行锁、断开持锁连接后不写回这些测试只在真实 PostgreSQL 上跑。
 
@@ -191,7 +207,8 @@ OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`
 
 ## 诚实的状态标注
 
-- ✅ 已实现并测试：人格引擎、统一事件格式、审批门控、主动调度总开关、Character OS Bridge。
+- ✅ 已实现并测试：人格引擎、统一事件格式、Character OS Bridge。审批门控、主动调度总开关预留着，还没接到真正的动作上。
+- ✅ 管理命令（Module 9）：每日花费上限、不理的 QQ 号、每个群说话 / 只回 @ / 不说话存在数据库里，用 `fish` 命令改，奶蛙每 5 秒读一次，不用重启；`naiwa status` 看的是正在跑的奶蛙（心跳）。
 - ✅ 群里什么时候说话（Module 7 和补充 7b）：明确叫它的（@、引用它的话）要回；开头叫名字的、叫过或回过 30 秒内的人说的话交给模型判断，判断不回就一个字都不发；连着发的几句等他停 7 秒一起看，一次可以分别回几个人；只 @ 不说话先等 8 秒，没说话回“干嘛蛙”；群里最近的聊天只在内存里当上文；同一个人回得太多暂时不理，可配置不理的 QQ 号。
 - ✅ 记忆 v2：后台提炼带出处的事实、按地方取用（私聊不进群）、按说出时间到期、按人删除、运行锁（同一时间只有一个机器人，删除时机器人必须停）。
 - ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。

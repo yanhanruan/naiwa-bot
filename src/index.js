@@ -39,3 +39,5 @@ export { QQ_FACES, faceName } from './qq-faces.js';
 export { openStorage, openTestStorage, migrate } from './storage/index.js';
 export { Mood, MOOD_LEVELS, MOOD_DEFAULTS, moodDay, moodName, drawBase } from './mood/mood.js';
 export { loadMoodTexts, moodSection, extractMoodTags, MOOD_TAG_RULE } from './mood/prompt.js';
+export { Settings, SettingsError, parseSettings, GROUP_MODES, SETTING_DEFAULTS } from './admin/settings.js';
+export { BotStatus, readStatus, waitForApply, codeInfo, STATUS_DEFAULTS } from './admin/status.js';

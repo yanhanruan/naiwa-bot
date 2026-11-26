@@ -214,6 +214,8 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   // moodTexts 是每一档的说法（persona/moods，见 loadMoodTexts）。传 null 表示不用心情（测试、评测默认不用）。
   mood = null,
   moodTexts = {},
+  // 运行状态（Module 9，src/admin/status.js 的 BotStatus）：记下最后收到、发出消息的时间，给 naiwa status 看。
+  status = null,
 }) {
   // 奶蛙发出的消息 key，用于判断“引用了奶蛙”；按插入顺序淘汰。启动时用 sentMessageKeys 恢复。
   const sentMessages = new Set(sentMessageKeys.slice(-SENT_MESSAGE_LIMIT));
@@ -303,6 +305,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       ? await client.sendGroupMsg(message.source.targetId, body, opts)
       : await client.sendPrivateMsg(message.source.targetId, body, opts);
     rememberSent(message, result, reply);
+    status?.noteReply();
     return result;
   }
 
@@ -322,13 +325,16 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     }
   }
 
+  // 群开关调成了“不说话”（Module 9）：正在攒的、模型正在想的，也都不发。
+  const groupOff = (conversation) => conversation.kind === 'group' && participation.groupMode?.(conversation.key) === 'off';
+
   // 回复时要不要引用原消息：这句之后群里别人又说了 2 条以上。
   const othersAfter = (message) => groupContext?.countAfter(message.conversation.key, message.key, message.sender.key) ?? 0;
 
   // 判断这条消息怎么处理。整个函数是同步的、不改任何状态：后到的消息一定看得到前面登记的结果（正在攒的一轮、在等的空 @）。
   function decide(message) {
     const base = participation.classify(message, { quotesSelf: quotesSelf(message) });
-    if (message.conversation.kind !== 'group' || base.reason === 'ignored_user' || base.reason === 'person_cap') return base;
+    if (message.conversation.kind !== 'group' || ['ignored_user', 'person_cap', 'group_off'].includes(base.reason)) return base;
     const held = holds.get(waitKey(message));
     if (held) {
       // 这个人刚才只 @ 不说话，这是他补的话：连同那个 @ 一起放进这一轮。又是一个空 @ 的话，重新开始等。
@@ -353,6 +359,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       return;
     }
     if (!message) return;
+    status?.noteMessage();
     const log = logger.child({ messageKey: message.key });
     if (stopping) {
       log.info('message.ignored', { reason: 'shutting_down' });
@@ -360,8 +367,8 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     }
     const { conversation, sender } = message;
     const isGroup = conversation.kind === 'group';
-    // 群消息都记进“群里最近的聊天”（不理的人除外），奶蛙被叫到时当上文；只在内存里。
-    if (isGroup && groupContext && !participation.isIgnored(sender.key)) groupContext.add(message);
+    // 群消息都记进“群里最近的聊天”（不理的人、“不说话”的群除外），奶蛙被叫到时当上文；只在内存里。
+    if (isGroup && groupContext && !participation.isIgnored(sender.key) && !groupOff(conversation)) groupContext.add(message);
     const decision = decide(message);
     if (decision.action === 'ignore') {
       if (decision.reason === 'person_cap' && decision.notify) {
@@ -494,6 +501,11 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       // 从这里开始算“在发了”：之后才到的补充按留意处理。检查和移走之间没有 await，不会被插队。
       if (held.cancelled) return;
       if (holds.get(waitKey(message)) === held) holds.delete(waitKey(message));
+      if (groupOff(message.conversation)) {
+        log.info('message.done', { outcome: 'group_off', trigger: 'empty_mention', totalMs: Date.now() - receivedAt });
+        await conclude(item, { status: 'silent', outcome: 'group_off' });
+        return;
+      }
       held.state = 'sending';
       const { conversation, sender } = message;
       const isGroup = conversation.kind === 'group';
@@ -575,6 +587,10 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     if (!live.length) return;
     const { conversation } = live[0].message;
     const isGroup = conversation.kind === 'group';
+    if (groupOff(conversation)) {
+      await skipGroupOff(live, rlog);
+      return;
+    }
     // 这一轮有谁，按第一次说话的先后；每人怎么来的见 round.members。
     const members = new Map();
     for (const item of live) {
@@ -589,7 +605,13 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     try {
       output = await generate(conversation, live, members, rlog);
     } catch (error) {
-      await roundFailed(error, { conversation, live, members, startedAt, rlog });
+      if (groupOff(conversation)) await skipGroupOff(live, rlog);
+      else await roundFailed(error, { conversation, live, members, startedAt, rlog });
+      return;
+    }
+    // 模型在想的时候，群开关调成了“不说话”：不发。
+    if (groupOff(conversation)) {
+      await skipGroupOff(live, rlog);
       return;
     }
     const replyMs = Date.now() - startedAt;
@@ -878,6 +900,15 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
         sendAttempts: attempts > 1 ? attempts : undefined,
       });
       await conclude(item, { status: 'notice', outcome, errorCode, sentMessageId: sent?.message_id, sendAttempts: attempts });
+    }
+  }
+
+  // 群开关是“不说话”：这一轮的几句都不回（不发提示，不写原话表）。
+  async function skipGroupOff(live, rlog) {
+    rlog.info('round.skipped', { msg: '这个群调成了不说话，这一轮不发', reason: 'group_off' });
+    for (const item of live) {
+      item.log.info('message.done', { outcome: 'group_off', trigger: item.trigger, totalMs: Date.now() - item.receivedAt });
+      await conclude(item, { status: 'silent', outcome: 'group_off' });
     }
   }
 

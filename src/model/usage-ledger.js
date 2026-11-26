@@ -69,4 +69,24 @@ export class ModelUsageLedger {
       searches: Number(r.searches),
     };
   }
+
+  // 某一天（北京时间）按模型、按会话分开的花费，给 naiwa budget 看（Module 9）。calls 含用量未知的调用。
+  async breakdown(at = new Date(), { topConversations = 3 } = {}) {
+    const day = beijingDate(at);
+    const byModel = await this.db.query(
+      `SELECT model, SUM(cost_cny)::float8 AS cost, SUM(calls + unknown_calls)::int AS calls
+         FROM model_usage WHERE tenant_id = $1 AND day = $2 GROUP BY model ORDER BY cost DESC`,
+      [this.tenantId, day],
+    );
+    const byConversation = await this.db.query(
+      `SELECT conversation_key, SUM(cost_cny)::float8 AS cost
+         FROM model_usage WHERE tenant_id = $1 AND day = $2 GROUP BY conversation_key ORDER BY cost DESC LIMIT $3`,
+      [this.tenantId, day, topConversations],
+    );
+    return {
+      day,
+      byModel: byModel.rows.map((r) => ({ model: r.model, costCny: Number(r.cost), calls: Number(r.calls) })),
+      byConversation: byConversation.rows.map((r) => ({ conversationKey: r.conversation_key, costCny: Number(r.cost) })),
+    };
+  }
 }

@@ -6,11 +6,11 @@
   "description": "奶蛙：有个性的 QQ 客服机器人。人格引擎 + 记忆（带出处的事实）+ 事件存储（PostgreSQL）+ 审批策略 + 主动行为调度",
   "license": "MIT",
   "bin": {
-    "fish": "./bin/fish.mjs"
+    "naiwa": "./bin/naiwa.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.js",
-    "fish": "node --env-file=.env ./bin/fish.mjs",
+    "naiwa": "node --env-file=.env ./bin/naiwa.mjs",
     "daemon": "node --env-file=.env ./bin/fish-daemon.mjs",
     "eval:memory": "node --env-file=.env scripts/eval-memory.mjs",
     "eval:participation": "node --env-file=.env scripts/eval-participation.mjs",
