@@ -1,0 +1,12 @@
+# 构建镜像时不要把这些发给 Docker：密钥、聊天数据、备份、日志都不能进镜像。
+.env
+.env.*
+!.env.example
+data/
+backups/
+logs/
+node_modules/
+.git/
+.tmp-test-*/
+test/
+docs/

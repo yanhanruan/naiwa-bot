@@ -13,6 +13,13 @@ export class ModelUsageLedger {
     this.tenantId = tenantId;
   }
 
+  // 删掉 keepDays 天以前（按北京时间的日期）的用量记录：私聊的会话编号里带着号码，不能一直留着（Module 10）。
+  async prune({ keepDays = 90, at = new Date() } = {}) {
+    const oldest = beijingDate(new Date(at.getTime() - (keepDays - 1) * 86_400_000));
+    const { rowCount } = await this.db.query('DELETE FROM model_usage WHERE tenant_id = $1 AND day < $2::date', [this.tenantId, oldest]);
+    return rowCount;
+  }
+
   /**
    * 记一次调用。
    * @param {object} args

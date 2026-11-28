@@ -1,3 +1,27 @@
+# 奶蛙的全部服务（Module 10，见 docs/deploy.md）：
+#   docker compose up -d      数据库 + 奶蛙 + 每日备份 + 提醒
+#   npm run deploy            更新代码后重建奶蛙镜像（带上提交号）并重启 bot、alert
+# 项目名写死成 naiwa-bot：在任何工作区里跑 docker compose / scripts/backup.sh，找到的都是同一个数据库。
+# SnowLuma（QQ）在它自己的 compose 里（docs/deploy.md 第 2 步），奶蛙和提醒服务加入它的 Docker 网络连它。
+name: naiwa-bot
+
+x-app: &app
+  build:
+    context: .
+    args:
+      GIT_COMMIT: ${GIT_COMMIT:-}
+  image: naiwa-bot:local
+  init: true
+  env_file: .env
+  networks: [default, snowluma]
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: 10m, max-file: "3" }
+
 services:
   # PostgreSQL：奶蛙的全部持久数据（记忆、事件、角色状态、关系）。
   # 只监听本机 127.0.0.1，不对局域网开放。密码来自同目录 .env 的 POSTGRES_PASSWORD。
@@ -20,17 +44,67 @@ services:
       retries: 10
     restart: unless-stopped
 
-  # 主动行为守护进程（可选）。QQ 机器人目前在宿主机上运行，容器化留给 Module 10。
-  fish:
-    build: .
-    profiles: ["daemon"]
+  # 奶蛙本体。崩了、数据库断开退出、Docker 重启后都会自己起来；docker compose stop 是正常退出，不会被拉起，也不会提醒。
+  bot:
+    <<: *app
     environment:
       DATABASE_URL: postgres://naiwa:${POSTGRES_PASSWORD}@db:5432/naiwa
-      FISH_TICK_MS: "60000"
+      ONEBOT_WS: ${BOT_ONEBOT_WS:-ws://snowluma:3001}
+      LOG_DIR: /app/logs
+      LOG_FORMAT: json
+    volumes:
+      - ./logs:/app/logs
+    # 退出时最多等 10 秒处理完手上的消息
+    stop_grace_period: 15s
+
+  # 提醒：每 5 分钟查一次，出问题 QQ 私聊 ALERT_QQ、Bark 推到 ALERT_BARK_URL（scripts/alert-check.mjs）。
+  alert:
+    <<: *app
+    command: ["node", "scripts/alert-check.mjs"]
+    environment:
+      DATABASE_URL: postgres://naiwa:${POSTGRES_PASSWORD}@db:5432/naiwa
+      ALERT_ONEBOT_WS: ${ALERT_ONEBOT_WS:-ws://snowluma:3001}
+      LOG_DIR: /app/logs
+      LOG_FORMAT: json
+    volumes:
+      - ./logs:/app/logs
+      - ./backups:/app/backups:ro
+
+  # 每天北京时间 4:00 备份一次、留 7 天，备份完做一次恢复演练（scripts/backup-daily.sh）。和数据库用同一个镜像。
+  backup:
+    image: ${POSTGRES_IMAGE:-postgres:18-alpine}
+    command: ["sh", "/scripts/backup-daily.sh"]
+    environment:
+      PGHOST: db
+      PGUSER: naiwa
+      PGDATABASE: naiwa
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-7}
+      IN_BACKUP_CONTAINER: "1"
+    volumes:
+      - ./backups:/backups
+      - ./scripts/backup-daily.sh:/scripts/backup-daily.sh:ro
+      - ./scripts/restore-drill.sh:/scripts/restore-drill.sh:ro
     depends_on:
       db:
         condition: service_healthy
     restart: unless-stopped
 
+  # 主动行为守护进程（可选，默认不起）。
+  fish:
+    <<: *app
+    profiles: ["daemon"]
+    command: ["node", "bin/fish-daemon.mjs"]
+    environment:
+      DATABASE_URL: postgres://naiwa:${POSTGRES_PASSWORD}@db:5432/naiwa
+      FISH_TICK_MS: "60000"
+    networks: [default]
+
 volumes:
   naiwa-pg:
+
+networks:
+  # SnowLuma 的 compose 项目叫 snowluma，它的默认网络就是 snowluma_default。
+  snowluma:
+    external: true
+    name: ${SNOWLUMA_NETWORK:-snowluma_default}

@@ -1,0 +1,40 @@
+# SnowLuma（Linux QQ + OneBot v11）的 compose 写法，新环境照这个起（见 docs/deploy.md 第 2 步）。
+# 放在它自己的目录里跑（目录名就是 compose 项目名，要叫 snowluma：奶蛙按 snowluma_default 这个网络名找它）：
+#   mkdir -p ~/snowluma && cp deploy/snowluma/docker-compose.yml ~/snowluma/ && cd ~/snowluma && docker compose up -d
+# 镜像按摘要固定到 2026-11 一直在用的版本（tag 是 latest，摘要不会变）。要升级时先自己拉新版本、改摘要、做一次 QQ 冒烟检查。
+# QQ 登录状态存在下面三个卷里：别 down -v，换目录（项目名变了）也要重新扫码。
+services:
+  snowluma:
+    image: motricseven7/snowluma@sha256:9b035551e8615a20d8367601a6a61c641796d9ed870f5501830f045b68f74667
+    container_name: snowluma
+    restart: unless-stopped
+    shm_size: 1gb
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 1048576
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp=unconfined
+    environment:
+      TZ: Asia/Shanghai
+      SNOWLUMA_WEBUI_HOST: 0.0.0.0
+      SNOWLUMA_WEBUI_PORT: 5099
+      SNOWLUMA_LOG_LEVEL: info
+      SNOWLUMA_SCREEN: 1280x800x24
+      SNOWLUMA_HOOK_AUTOLOAD: 1
+      SNOWLUMA_QQ_FLAGS: "--disable-gpu --disable-software-rasterizer --disable-gpu-compositing"
+    ports:
+      - "127.0.0.1:6081:6081"   # noVNC 浏览器远程桌面（扫码）
+      - "127.0.0.1:5099:5099"   # SnowLuma WebUI
+      - "127.0.0.1:3001:3001"   # OneBot WebSocket（奶蛙在 Docker 里经 snowluma_default 网络连，这个端口给 npm run bot 用）
+    volumes:
+      - snowluma-data:/app/data
+      - snowluma-qq-config:/app/.config
+      - snowluma-qq-data:/app/.local/share
+
+volumes:
+  snowluma-data:
+  snowluma-qq-config:
+  snowluma-qq-data:

@@ -126,6 +126,10 @@ fish-bot 与 SnowLuma 之间只有一条正向 WebSocket 连接，由 `src/adapt
 
 详见 [Module 6 导读](module-06-context.md) 和 [记忆 v2 设计](memory-v2-design.md)。
 
+## 部署与可观测性
+
+见 [部署与运维](deploy.md)。`docker compose` 里四个服务：`db`（PostgreSQL）、`bot`（奶蛙）、`backup`（每天 4 点备份、做恢复演练）、`alert`（每 5 分钟查一次，出问题 QQ 私聊加 Bark 推到手机）；SnowLuma 在自己的 compose 里，奶蛙经它的 Docker 网络连。日志每天一个文件（`logs/`，留 14 天），`npm run trace` 按群、人、时间查一句话走到了哪一步和当时的状态。
+
 ## 存储
 
 PostgreSQL（`docker compose` 的 `db` 服务，只监听 127.0.0.1），表结构见 `migrations/`：

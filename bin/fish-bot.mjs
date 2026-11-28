@@ -6,6 +6,7 @@
 //   export DATABASE_URL=postgres://...   # PostgreSQL（见 docker-compose.yml 的 db 服务）
 //   node bin/fish-bot.mjs     # 默认连 ws://127.0.0.1:3001
 // 日志：LOG_LEVEL=debug|info|warn|error（默认 info）；LOG_FORMAT=pretty|json（默认：终端里 pretty，否则 json）。
+//   LOG_DIR 设了就另写一份到文件（每天一个、到 debug 级别），留 LOG_KEEP_DAYS 天（默认 14），npm run trace 读它（Module 10）。
 // 管理命令（见 docs/module-09-admin-design.md）：每日花费上限、不理的 QQ 号、每个群说不说话都存在数据库里，
 //   用 naiwa budget / naiwa ignore / naiwa group 改，奶蛙每 5 秒读一次，不用重启。naiwa status 看奶蛙现在怎么样。
 // 模型调用的限制（见 docs/module-04-model.md）：
@@ -150,8 +151,9 @@ const fish = await (await Fish.open({ db, writer, name: '奶蛙' })).start();
 // 设置和运行状态（Module 9）：先读一遍设置（读不到就不启动），之后每 5 秒读一次设置、写一次心跳。
 const settings = new Settings({ db, tenantId: fish.tenantId });
 const status = new BotStatus({ db, tenantId: fish.tenantId, settings, logger: log });
+const code = codeInfo(root);
 try {
-  await status.start(codeInfo(root));
+  await status.start(code);
 } catch (error) {
   console.error(`读设置失败：${error?.message ?? error}`);
   await writer.close();
@@ -208,6 +210,16 @@ async function prune() {
   } catch (error) {
     log.error('memory.prune_failed', { msg: '清理到期事实失败', error });
   }
+  // Module 10：花费表、事件表留 90 天；日志文件留 LOG_KEEP_DAYS 天（默认 14）。
+  try {
+    const usage = await ledger.prune({ keepDays: 90 });
+    const events = await fish.events.prune({ keepDays: 90 });
+    if (usage || events) log.info('ops.pruned', { msg: '已清理 90 天前的花费记录和事件', usage, events });
+  } catch (error) {
+    log.error('ops.prune_failed', { msg: '清理花费记录和事件失败', error });
+  }
+  const logFiles = log.pruneFiles();
+  if (logFiles) log.info('log.pruned', { msg: '已清理过期的日志文件', count: logFiles });
 }
 await prune();
 setInterval(() => void prune(), 24 * 3_600_000).unref();
@@ -283,7 +295,7 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 process.on('SIGTERM', () => void shutdown('SIGTERM'));
 
 log.info('bot.started', {
-  msg: `${fish.character.name} 醒来`, model, webSearch, reasoningEffort, storage: 'PostgreSQL', recordFile: recordFile || undefined,
+  msg: `${fish.character.name} 醒来`, version: code.commit ?? undefined, model, webSearch, reasoningEffort, storage: 'PostgreSQL', recordFile: recordFile || undefined,
   dailyBudgetCny: settings.dailyBudgetCny || '不限', ratePerMinute: ratePerMinute || '不限', ratePerHour: ratePerHour || '不限',
   memoryExtraction, memoryModel: memoryExtraction ? memoryModel : undefined,
   imageUnderstanding, imageModel: imageUnderstanding ? imageModel : undefined,

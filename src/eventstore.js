@@ -37,6 +37,13 @@ export class EventStore {
     this.tenantId = tenantId;
   }
 
+  // 删掉 keepDays 天以前的事件（Module 10：事件表原来不清理）。
+  async prune({ keepDays = 90 } = {}) {
+    const { rowCount } = await this.db.query(
+      `DELETE FROM events WHERE tenant_id = $1 AND ts < now() - ($2::int * interval '1 day')`, [this.tenantId, keepDays]);
+    return rowCount;
+  }
+
   async append(partial) {
     const ev = {
       id: randomUUID(),

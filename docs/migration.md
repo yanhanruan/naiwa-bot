@@ -1,5 +1,7 @@
 # Linux / Docker 迁移准备（Phase 5）
 
+> 部署已在 Module 10 改成 docker compose 跑全部服务，最新的步骤见 [部署与运维](deploy.md)。下面是旧的迁移笔记，Docker、备份、日志几节以 deploy.md 为准。
+
 `fish-os` 零外部依赖、纯 ESM，可直接搬 Linux。下面是迁移要点。
 
 ## Docker 运行

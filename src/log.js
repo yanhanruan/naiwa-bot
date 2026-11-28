@@ -4,6 +4,11 @@
 // - 一条消息经历的各个阶段都带上 messageKey，按它就能串起这条消息的完整经过。
 // - 不记录聊天正文、昵称、token：日志只放标识、计数、耗时和错误。
 // - 写日志失败不影响业务。
+// - 设了 LOG_DIR 时另写一份到文件（Module 10）：每天一个文件、到 debug 级别、一行一个 JSON，超过 LOG_KEEP_DAYS（默认 14）天删掉。
+//   终端和 docker logs 仍按 LOG_LEVEL。npm run trace 读这些文件。
+
+import { appendFileSync, mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const LEVELS = { debug: 10, info: 20, warn: 30, error: 40 };
 const LEVEL_TEXT = { debug: '调试', info: '信息', warn: '警告', error: '错误' };
@@ -85,11 +90,75 @@ export function createLogger({ level = 'info', format = 'json', write = defaultW
   };
 }
 
+// 北京时间的日期，例如 2026-11-26（中国没有夏令时，固定 +8 小时）。
+export function beijingDay(at) {
+  return new Date(new Date(at).getTime() + 8 * 3_600_000).toISOString().slice(0, 10);
+}
+
+const LOG_FILE = /^([a-z]+)-(\d{4}-\d{2}-\d{2})\.jsonl$/;
+
+/**
+ * 日志文件：<dir>/<prefix>-<北京日期>.jsonl，只有本人能读。
+ * 写失败不抛错，只在标准错误里说一次（之后又写成功了再说一次）。
+ */
+export function createLogFile({ dir, prefix = 'bot', keepDays = 14, now = () => new Date(), onError = (text) => process.stderr.write(`${text}\n`) }) {
+  const root = resolve(dir);
+  let failing = false;
+  return {
+    dir: root,
+    write(record) {
+      try {
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        appendFileSync(join(root, `${prefix}-${beijingDay(record.ts)}.jsonl`), `${JSON.stringify(record)}\n`, { mode: 0o600 });
+        if (failing) onError('日志文件又写得进去了');
+        failing = false;
+      } catch (error) {
+        if (!failing) onError(`日志文件写不进去（${error?.code ?? error?.message ?? error}），先只打到终端`);
+        failing = true;
+      }
+    },
+    // 删掉 keepDays 天以前的日志文件（所有前缀都删：奶蛙、提醒服务写在同一个目录）。返回删了几个。
+    prune() {
+      const oldest = beijingDay(now().getTime() - (keepDays - 1) * 86_400_000);
+      let removed = 0;
+      let names = [];
+      try {
+        names = readdirSync(root);
+      } catch {
+        return 0;
+      }
+      for (const name of names) {
+        const match = LOG_FILE.exec(name);
+        if (!match || match[2] >= oldest) continue;
+        try {
+          unlinkSync(join(root, name));
+          removed += 1;
+        } catch {
+          // 删不掉下次再删
+        }
+      }
+      return removed;
+    },
+  };
+}
+
 // 运行时默认：LOG_LEVEL 控制级别；LOG_FORMAT 未设置时，终端里用 pretty，否则（例如 Docker）用 json。
-export function loggerFromEnv(env = process.env, stream = process.stdout) {
+// 设了 LOG_DIR：另写一份到文件（总是到 debug 级别），返回的 logger 多一个 pruneFiles()。
+export function loggerFromEnv(env = process.env, stream = process.stdout, { prefix = 'bot', now } = {}) {
   const format = env.LOG_FORMAT === 'json' || env.LOG_FORMAT === 'pretty'
     ? env.LOG_FORMAT : (stream.isTTY ? 'pretty' : 'json');
-  return createLogger({ level: env.LOG_LEVEL || 'info', format });
+  const level = env.LOG_LEVEL || 'info';
+  if (!env.LOG_DIR) return { ...createLogger({ level, format }), pruneFiles: () => 0 };
+  const keepDays = Number(env.LOG_KEEP_DAYS || 14);
+  if (!Number.isInteger(keepDays) || keepDays < 1) throw new Error('LOG_KEEP_DAYS 必须是不小于 1 的整数');
+  const file = createLogFile({ dir: env.LOG_DIR, prefix, keepDays, ...(now ? { now } : {}) });
+  const consoleMin = LEVELS[level] ?? LEVELS.info;
+  const write = (line, lvl, record) => {
+    if (LEVELS[lvl] >= consoleMin) defaultWrite(line, lvl);
+    file.write(record);
+  };
+  const logger = createLogger({ level: 'debug', format, write, ...(now ? { now } : {}) });
+  return { ...logger, level: Object.keys(LEVELS).find((k) => LEVELS[k] === consoleMin), logDir: file.dir, pruneFiles: () => file.prune() };
 }
 
 export const silentLogger = createLogger({ write: () => {} });

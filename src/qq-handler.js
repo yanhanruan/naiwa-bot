@@ -360,7 +360,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
     }
     if (!message) return;
     status?.noteMessage();
-    const log = logger.child({ messageKey: message.key });
+    const log = logger.child({ messageKey: message.key, sender: message.sender?.key });
     if (stopping) {
       log.info('message.ignored', { reason: 'shutting_down' });
       return;

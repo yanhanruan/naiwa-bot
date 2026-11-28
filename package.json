@@ -11,6 +11,9 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "naiwa": "node --env-file=.env ./bin/naiwa.mjs",
+    "bot": "node --env-file=.env ./bin/fish-bot.mjs",
+    "trace": "node --env-file=.env scripts/trace.mjs",
+    "deploy": "GIT_COMMIT=$(git rev-parse --short HEAD)$(git diff --quiet HEAD -- . || echo -dirty) docker compose up -d --build",
     "daemon": "node --env-file=.env ./bin/fish-daemon.mjs",
     "eval:memory": "node --env-file=.env scripts/eval-memory.mjs",
     "eval:participation": "node --env-file=.env scripts/eval-participation.mjs",

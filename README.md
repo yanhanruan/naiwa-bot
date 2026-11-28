@@ -89,13 +89,24 @@ naiwa-bot/
 ├── scripts/
 │   ├── backup.sh           # pg_dump 备份
 │   ├── restore.sh          # pg_restore 恢复（机器人没停会拒绝；恢复前先备份当前数据库）
+│   ├── backup-daily.sh     # 每日备份（在 backup 容器里跑）
+│   ├── restore-drill.sh    # 恢复演练：恢复进临时库检查，不碰线上库
+│   ├── trace.mjs           # 查卡在哪（npm run trace）
+│   ├── alert-check.mjs     # 提醒：QQ 私聊 + Bark 推到手机（在 alert 容器里跑）
+│   ├── launch-cleanup.sh   # 上线前清理：列出开发期的数据
 │   └── eval-memory.mjs     # 提炼效果评测（调用真模型）
-├── Dockerfile              # Linux/Docker 镜像
-├── docker-compose.yml      # PostgreSQL（db）+ 可选守护进程
+├── Dockerfile              # 奶蛙的镜像（bot、alert 服务用）
+├── docker-compose.yml      # 数据库 + 奶蛙 + 每日备份 + 提醒
+├── deploy/snowluma/        # SnowLuma 的 compose 写法（镜像按摘要固定）
 ├── docs/
-│   └── migration.md        # Linux/Docker 迁移
+│   ├── deploy.md           # 部署与运维：新环境启动、切换、查卡在哪、备份恢复、提醒、上线清理
+│   └── migration.md        # Linux/Docker 迁移（旧，见 deploy.md）
 └── test/                   # 验收与回归测试
 ```
+
+## 部署
+
+奶蛙用 Docker 跑：`npm run deploy` 起数据库、奶蛙、每日备份、提醒四个服务。新环境从零启动、平时怎么切换、出了事怎么查（`npm run trace`）、备份恢复和上线前清理，都见 [部署与运维](docs/deploy.md)。
 
 ## 快速开始（CLI）
 
@@ -203,12 +214,15 @@ OneBot 传输层的测试用一个本地 WebSocket 服务端（开发依赖 `ws`
 
 消息处理运行时的测试覆盖连续消息看得到前文、重复消息只回复一次（含重启后）、太旧的消息不回复、排队上限、发送失败的重试与不重试、退出时等待，见 [Module 5 导读](docs/module-05-runtime.md)。
 
+部署与可观测性的测试（`test/ops.test.js`）覆盖日志文件按北京时间分天、权限和到期删除；trace 把各种结果翻对、按日期查、查不到时分清掉线 / 断开 / 停着 / 没记录 / 超过 14 天；提醒只说一次、好了再说、主动停机不提醒、意外停机才提醒；花费表、事件表 90 天清理，见 [Module 10 设计稿](docs/module-10-deploy-design.md) 第 7 节。每日备份和恢复演练脚本在临时的 PostgreSQL 容器里试过。
+
 上下文与长期记忆的测试覆盖重启后记得对话、跨群认人且印象一致、群里的具体事不跨群、私聊内容永远不进群、相同内容属于不同的人、全局代号并发分配不重号，见 [Module 6 导读](docs/module-06-context.md)。
 
 ## 诚实的状态标注
 
 - ✅ 已实现并测试：人格引擎、统一事件格式、Character OS Bridge。审批门控、主动调度总开关预留着，还没接到真正的动作上。
-- ✅ 管理命令（Module 9）：每日花费上限、不理的 QQ 号、每个群说话 / 只回 @ / 不说话存在数据库里，用 `fish` 命令改，奶蛙每 5 秒读一次，不用重启；`naiwa status` 看的是正在跑的奶蛙（心跳）。
+- ✅ 部署与可观测性（Module 10）：docker compose 一条命令起来、崩了自己回来；日志每天一个文件留 14 天，`npm run trace` 查一句话走到了哪一步和当时的状态；每天自动备份留 7 天、备份完做恢复演练；出问题 QQ 私聊加 Bark 推到手机。见 [部署与运维](docs/deploy.md)。
+- ✅ 管理命令（Module 9）：每日花费上限、不理的 QQ 号、每个群说话 / 只回 @ / 不说话存在数据库里，用 `naiwa` 命令改，奶蛙每 5 秒读一次，不用重启；`naiwa status` 看的是正在跑的奶蛙（心跳）。
 - ✅ 群里什么时候说话（Module 7 和补充 7b）：明确叫它的（@、引用它的话）要回；开头叫名字的、叫过或回过 30 秒内的人说的话交给模型判断，判断不回就一个字都不发；连着发的几句等他停 7 秒一起看，一次可以分别回几个人；只 @ 不说话先等 8 秒，没说话回“干嘛蛙”；群里最近的聊天只在内存里当上文；同一个人回得太多暂时不理，可配置不理的 QQ 号。
 - ✅ 记忆 v2：后台提炼带出处的事实、按地方取用（私聊不进群）、按说出时间到期、按人删除、运行锁（同一时间只有一个机器人，删除时机器人必须停）。
 - ✅ QQ 传输层：OneBot v11 正向 WebSocket 连接 SnowLuma，断线自动重连、请求超时、假活探测、发送节流、结构化日志（Module 3）。
