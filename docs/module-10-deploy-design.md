@@ -377,4 +377,4 @@ Module 9 已经在 2026-11-25 合并进 main，这个分支已经跟上 main。M
   - 提醒（没设收提醒的地方，只看它决定说什么）：奶蛙用命令停着 6 分多钟，没有“意外停了”；奶蛙起来但连不上 SnowLuma，约 6 分钟后说了一次“连不上 SnowLuma”；提醒服务自己连不上 SnowLuma，5 分钟后说了一次“SnowLuma 没响应”。
   - 演练完 `docker compose down -v`，目录删掉；线上的数据库和 SnowLuma 没动。
 - 演练发现并改了：第 4 步数据库刚起来还没就绪时跑迁移会失败，文档改成 `up -d --wait db`；演练环境要在 `.env` 里写 `COMPOSE_PROJECT_NAME`，不然 `npm run deploy` 会动到线上；trace 里几种问题补了中文说法。
-- 还没做：切到容器跑线上、Docker Desktop 重启、真恢复、提醒真发到 QQ 和手机、QQ 冒烟检查。
+- 2026-11-28 合并进 main、切到容器跑，QQ 冒烟检查通过，结果见路线图“Module 10”一节。还没在线上做：Docker Desktop 重启、真恢复线上库、意外停机和连不上 SnowLuma 的提醒真发。
