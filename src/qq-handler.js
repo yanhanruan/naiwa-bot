@@ -24,6 +24,8 @@ export const RUNTIME_DEFAULTS = {
   maxAgeMs: 3 * 60_000, // 消息超过这个时间（收到时或开始看时）就不再回复
   sendRetryWaitMs: 20_000, // 没连上 OneBot 时，最多等多久重连后再发一次
   emptyMentionWaitMs: 8_000, // 只 @ 不说话时，单独等这个人补话多久
+  // 只 @ 不说话的人，这么久以内在群里说过话：多半是想让奶蛙看看前面说的，照常交给模型，不等也不回“干嘛蛙”。
+  emptyMentionLookBackMs: 60_000,
   roundQuietMs: ROUND_DEFAULTS.quietMs, // 这一轮的人停了多久没说话就开始看
   roundMaxWaitMs: ROUND_DEFAULTS.maxWaitMs, // 从这一轮第一句算起最多等多久
   roundMaxMessages: ROUND_DEFAULTS.maxMessages, // 这一轮最多攒几句
@@ -50,6 +52,7 @@ const MEMBER_NOTES = {
   mention: (alias) => `${alias} @ 了你：要回他。`,
   quote: (alias) => `${alias} 引用了你说的话：要回他。`,
   after_empty_mention: (alias) => `${alias} 刚才单独 @ 了你一下，又接着说了话：要回他。`,
+  mention_after_talk: (alias) => `${alias} 只 @ 了你一下、没说别的；他 1 分钟内在群里说过话，多半是想让你看看他前面说的：要回他。`,
   name: (alias, member) => `${alias} 用你的名字开头，但没有 @ 你：可能是在叫你，也可能只是在聊“${member.name}”这个梗，或者是在回别人（看看群里刚才最后几句是不是有人在找他）。`,
   follow_up: (alias) => `${alias} 刚才和你聊过，这几句没有叫你：可能是接着跟你说，也可能是在跟别人说。`,
 };
@@ -173,7 +176,8 @@ const SEEN_LIMIT = 5000;
 // - 程序只决定“什么时候请模型看一眼”：明确叫它（私聊、@、引用它的话）、开头叫名字、正在留意的人说话；
 //   规则在 runtime/participation.js；
 // - 看的时候把这段时间的几句一起给它（每个会话攒成“一轮”，见 runtime/round-queue.js）；回不回、回几条、回谁，由模型定；
-// - 只 @ 不说话：单独给这个人几秒补话，不拖住别人；补了就并进一轮，没补就回固定的“干嘛蛙”；
+// - 只 @ 不说话：他 1 分钟内在群里说过话的，多半是想让奶蛙看看前面说的，照常交给模型；
+//   没说过的，单独给这个人几秒补话，不拖住别人；补了就并进一轮，没补就回固定的“干嘛蛙”；
 // - 其余不说话，只记进群里最近的聊天（内存里，见 runtime/group-context.js），奶蛙被叫到时当上文。
 // 日志：每条被处理的消息都带 messageKey，依次记录 message.accepted →（各阶段失败）→ message.done；
 // 一轮的日志带 conversationKey 和 round。日志里不写聊天正文、回复内容和昵称，只写标识、长度、耗时和结果。
@@ -202,6 +206,7 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
   participation = new Participation({ botNames, now: clock }),
   groupContext = new GroupContext({ now: clock }),
   emptyMentionWaitMs = RUNTIME_DEFAULTS.emptyMentionWaitMs,
+  emptyMentionLookBackMs = RUNTIME_DEFAULTS.emptyMentionLookBackMs,
   roundQuietMs = RUNTIME_DEFAULTS.roundQuietMs,
   roundMaxWaitMs = RUNTIME_DEFAULTS.roundMaxWaitMs,
   roundMaxMessages = RUNTIME_DEFAULTS.roundMaxMessages,
@@ -345,6 +350,10 @@ export function createQQHandler({ fish, brain, getClient, persona, socialRules =
       // 他在正在攒的这一轮里：这句也算进来，不管有没有 @。
       if (base.action === 'wait') return { action: 'explicit', reason: 'mention' };
       if (base.action === 'ignore') return { action: 'member', reason: 'member' };
+    }
+    // 只 @ 不说话，但他 1 分钟内在群里说过话：不等补话、不回“干嘛蛙”，照常交给模型（上下文里有他刚才说的）。
+    if (base.action === 'wait' && groupContext?.saidBefore(message.conversation.key, message.key, emptyMentionLookBackMs)) {
+      return { action: 'explicit', reason: 'mention_after_talk' };
     }
     return base;
   }

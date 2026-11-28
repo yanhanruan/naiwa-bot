@@ -62,20 +62,37 @@ export class GroupContext {
     this.options = { ...GROUP_CONTEXT_DEFAULTS, ...given };
     this.options.keepEntries = Math.max(this.options.keepEntries, this.options.maxEntries);
     this.now = now;
-    this.groups = new Map(); // 会话 key -> [{ key, seq, at, sender, parts }]，从早到晚
+    this.groups = new Map(); // 会话 key -> [{ key, seq, at, sender, parts, previousAt }]，从早到晚
+    // 群+人 -> 他上一条消息的时间。单独记：奶蛙回复过、被挤出去的消息不在上面的列表里了，也要算他说过话。
+    this.lastSaid = new Map();
     this.seq = 0;
   }
 
-  // 记下一条群消息。同一条消息收到两次只记一次。
+  // 记下一条群消息。同一条消息收到两次只记一次。previousAt：这个人在这个群里上一条消息的时间（没有就不写）。
   add(message) {
     const conversationKey = message.conversation.key;
     const list = this._fresh(conversationKey);
     if (list.some((e) => e.key === message.key)) return;
     this.seq += 1;
+    const at = this.now();
+    const who = `${conversationKey}\u001f${message.sender.key}`;
+    const previousAt = this.lastSaid.get(who);
+    this.lastSaid.delete(who); // 删了再放，Map 里就按最后说话的时间排，清理时从头删
+    this.lastSaid.set(who, at);
     const parts = this.options.keepText ? partsOf(message) : [];
-    list.push({ key: message.key, seq: this.seq, at: this.now(), sender: message.sender.key, parts });
+    list.push({ key: message.key, seq: this.seq, at, sender: message.sender.key, parts, previousAt });
     while (list.length > this.options.keepEntries) list.shift();
     this.groups.set(conversationKey, list);
+    for (const [key, when] of this.lastSaid) {
+      if (at - when <= this.options.maxAgeMs) break;
+      this.lastSaid.delete(key);
+    }
+  }
+
+  // 这条消息的发言者在它之前 withinMs 以内，在这个群里说过话没有（回复过的、被挤出去的也算）。找不到这条消息时算没说过。
+  saidBefore(conversationKey, messageKey, withinMs) {
+    const entry = this._fresh(conversationKey).find((e) => e.key === messageKey);
+    return entry?.previousAt !== undefined && entry.at - entry.previousAt <= withinMs;
   }
 
   // 奶蛙回复过的消息已经在对话历史里，从这里移走。

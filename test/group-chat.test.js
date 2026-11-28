@@ -668,6 +668,40 @@ test('只 @ 不说话：8 秒没说，回固定的“干嘛蛙”，不调用模
   assert.equal(h.sent.length, 1, '模型说不用回，就不发');
 });
 
+test('只 @ 不说话：他 1 分钟内在群里说过话（没叫奶蛙的也算），不等、不回“干嘛蛙”，照常交给模型，看得到他刚才说的', async () => {
+  const h = await setup();
+  await h.say({ message: '吃汉堡' }); // 没叫奶蛙，不看，只记进群里最近的聊天
+  assert.equal(h.requests.length, 0);
+  await h.advance(20_000);
+  await h.round({ message: AT });
+  assert.equal(h.requests.length, 1, '没有等 8 秒补话，停 3 秒就看了');
+  assert.deepEqual(h.texts(), ['收到']);
+  assert.match(nearbyOf(h.requests[0]), /u1（刚才）：吃汉堡$/);
+  assert.match(section(h.requests[0], '这一轮'), /u1 只 @ 了你一下、没说别的；他 1 分钟内在群里说过话/);
+  await h.advance(10_000);
+  assert.equal(h.sent.length, 1, '之后也不会再发“干嘛蛙”');
+});
+
+test('只 @ 不说话：他上一句奶蛙已经回过了，也算 1 分钟内说过话', async () => {
+  const h = await setup();
+  await h.round({ message: `${AT}推荐个奶茶` });
+  await h.advance(40_000); // 留意已经过了，回复过的那句也已从群里最近的聊天移走
+  await h.round({ message: AT });
+  assert.equal(h.requests.length, 2);
+  assert.deepEqual(h.texts(), ['收到', '收到']);
+});
+
+test('只 @ 不说话：他上一句是 1 分钟以前说的，照旧等 8 秒、回“干嘛蛙”，不调用模型', async () => {
+  const h = await setup();
+  await h.say({ message: '吃汉堡' });
+  await h.advance(60_001);
+  await h.say({ message: AT });
+  await h.advance(8000);
+  await waitFor(async () => (await h.status(2)) === 'replied', { what: '发出干嘛蛙' });
+  assert.deepEqual(h.texts(), [EMPTY_MENTION_REPLY]);
+  assert.equal(h.requests.length, 0);
+});
+
 test('只 @ 不说话：等他的 8 秒里，别人的话照常攒、照常看；“干嘛蛙”排在别人那一轮后面、还没发时他补了话，撤掉“干嘛蛙”，只答补的话', async () => {
   const h = await setup();
   const gates = gate(h);
@@ -1010,6 +1044,7 @@ test('群开关：模型正在想的时候调成不说话，这一轮不发、�
   assert.equal((await h.turns()).length, 0);
 
   h.settings.modes[200] = 'on';
+  await h.advance(61_000); // 隔 1 分钟以上再只 @：走等补话、“干嘛蛙”那条路（1 分钟内说过话的直接交给模型）
   await h.say({ message: AT });
   await h.advance(5000);
   h.settings.modes[200] = 'off';
@@ -1040,6 +1075,7 @@ test('群开关：只回 @ 的群，@、引用它照常回，@ 以后马上补�
   })()).includes('那芋泥的呢'), '没看的话照常进群里刚才在聊');
   assert.equal(h.sent.length, 2, '引用它的话照常回');
 
+  await h.advance(61_000); // 隔 1 分钟以上再只 @，才回“干嘛蛙”
   await h.say({ message: AT });
   await h.advance(8000);
   await waitFor(() => h.sent.length === 3, { what: '干嘛蛙' });
